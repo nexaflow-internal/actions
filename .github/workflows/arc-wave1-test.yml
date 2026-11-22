@@ -42,3 +42,21 @@ jobs:
             echo "Expected negative case outcome=failure, got ${{ steps.negative.outcome }}"
             exit 1
           fi
+
+  setup-go:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-go
+        uses: ./setup-go
+        with:
+          go-version: '1.24'
+
+      - name: verify setup-go
+        run: |
+          go version
+          go version | grep -q '^go version go1\.24'
+          echo "GOBIN=$(go env GOBIN)"
+          test "$(go env GOBIN)" = "$RUNNER_TEMP/gobin"

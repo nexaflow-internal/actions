@@ -1,0 +1,40 @@
+name: ARC wave1 wgetsum test
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  wgetsum:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: wgetsum positive case
+        uses: nexaflow-internal/actions/wgetsum@v0
+        with:
+          url: https://downloads.rclone.org/v1.60.1/rclone-v1.60.1-linux-amd64.zip
+          checksum: "fd6bc19cc7fadb13538cc109128bf92ef47762a83a3eaf2ab699b03bb2a1fe32"
+          output: ${{ runner.temp }}/rclone.zip
+          wget-flags: "-c --tries=3 --timeout=30"
+
+      - name: show checksum of downloaded file
+        run: sha256sum "$RUNNER_TEMP/rclone.zip"
+
+      - name: wgetsum negative case
+        id: negative
+        continue-on-error: true
+        uses: nexaflow-internal/actions/wgetsum@v0
+        with:
+          url: https://downloads.rclone.org/v1.60.1/rclone-v1.60.1-linux-amd64.zip
+          checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+          output: ${{ runner.temp }}/rclone-negative.zip
+          wget-flags: "-c --tries=3 --timeout=30"
+
+      - name: verify negative case failed
+        run: |
+          if [ "${{ steps.negative.outcome }}" != "failure" ]; then
+            echo "Expected negative case outcome=failure, got ${{ steps.negative.outcome }}"
+            exit 1
+          fi

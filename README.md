@@ -6,12 +6,12 @@ Public collection of GitHub Actions used by nexaflow CI. This repository is publ
 
 | Action | Origin | Status |
 | --- | --- | --- |
-| [`wgetsum`](wgetsum/) | copied from `chainguard-dev/actions@805da2efdffdc42b8afd8880e575a48b471ef544` | available as `nexaflow-internal/actions/wgetsum@v0` |
-| `setup-go` | nexaflow | planned, not published yet |
-| [`setup-yam`](setup-yam/) | nexaflow; wraps `chainguard-dev/yam` | implemented, yam `v0.2.69`; not published yet |
-| [`setup-rclone`](setup-rclone/) | nexaflow; downloads rclone via `wgetsum` | implemented, rclone `1.60.1`; not published yet |
+| [`wgetsum`](wgetsum/) | copied from `chainguard-dev/actions@805da2efdffdc42b8afd8880e575a48b471ef544` | published as `nexaflow-internal/actions/wgetsum@v0` |
+| [`setup-go`](setup-go/) | nexaflow | published as `nexaflow-internal/actions/setup-go@v1` |
+| [`setup-yam`](setup-yam/) | nexaflow; wraps `chainguard-dev/yam` | published as `nexaflow-internal/actions/setup-yam@v1` (yam `v0.2.69`) |
+| [`setup-rclone`](setup-rclone/) | nexaflow; downloads rclone via `wgetsum` | published as `nexaflow-internal/actions/setup-rclone@v1` (rclone `1.60.1`) |
 
-Only `wgetsum` is present today. The `setup-*` actions will be added in later tasks; they are listed here to document the intended layout of this repository.
+All four actions above are present in this repository and published under the tags shown. More actions will be added in later waves.
 
 ## Attribution
 
@@ -19,10 +19,13 @@ Only `wgetsum` is present today. The `setup-*` actions will be added in later ta
 
 ## Usage
 
-Once published, our actions are referenced as:
+Published actions are referenced as:
 
 ```yaml
-- uses: nexaflow-internal/actions/<name>@v1
+- uses: nexaflow-internal/actions/wgetsum@v0
+- uses: nexaflow-internal/actions/setup-go@v1
+- uses: nexaflow-internal/actions/setup-yam@v1
+- uses: nexaflow-internal/actions/setup-rclone@v1
 ```
 
-Until `v1` is released, use `nexaflow-internal/actions/wgetsum@v0`. Note that the action shells out to `wget`, so the runner must have `wget` installed.
+`wgetsum` remains pinned to `v0` to preserve the upstream import; the `setup-*` actions use `v1`. Documentation/CI-only changes after a tag are not republished. Note that `wgetsum` shells out to `wget`, so the runner must have `wget` installed.

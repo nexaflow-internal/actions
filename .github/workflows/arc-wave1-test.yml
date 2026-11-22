@@ -60,3 +60,19 @@ jobs:
           go version | grep -q '^go version go1\.24'
           echo "GOBIN=$(go env GOBIN)"
           test "$(go env GOBIN)" = "$RUNNER_TEMP/gobin"
+
+  setup-yam:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-yam
+        uses: ./setup-yam
+        with:
+          version: v0.2.69
+
+      - name: verify setup-yam
+        run: |
+          command -v yam
+          yam --help >/dev/null 2>&1

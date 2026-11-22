@@ -8,7 +8,7 @@ Public collection of GitHub Actions used by nexaflow CI. This repository is publ
 | --- | --- | --- |
 | [`wgetsum`](wgetsum/) | copied from `chainguard-dev/actions@805da2efdffdc42b8afd8880e575a48b471ef544` | available as `nexaflow-internal/actions/wgetsum@v0` |
 | `setup-go` | nexaflow | planned, not published yet |
-| `setup-yam` | nexaflow | planned, not published yet |
+| [`setup-yam`](setup-yam/) | nexaflow; wraps `chainguard-dev/yam` | implemented, yam `v0.2.69`; not published yet |
 | `setup-rclone` | nexaflow | planned, not published yet |
 
 Only `wgetsum` is present today. The `setup-*` actions will be added in later tasks; they are listed here to document the intended layout of this repository.

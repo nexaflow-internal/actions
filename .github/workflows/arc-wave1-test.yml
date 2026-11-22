@@ -11,6 +11,10 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
+      - name: ensure wget
+        run: |
+          command -v wget || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends wget; }
+
       - name: wgetsum positive case
         uses: nexaflow-internal/actions/wgetsum@v0
         with:

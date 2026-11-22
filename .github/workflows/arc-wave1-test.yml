@@ -76,3 +76,19 @@ jobs:
         run: |
           command -v yam
           yam --help >/dev/null 2>&1
+
+  setup-rclone:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-rclone
+        uses: ./setup-rclone
+        with:
+          version: 1.60.1
+
+      - name: verify setup-rclone
+        run: |
+          rclone version | head -1
+          rclone version | head -1 | grep -q 'rclone v1\.60\.1'

@@ -23,6 +23,14 @@ inputs:
     required: false
     default: ''
 
+outputs:
+  index-entries:
+    description: Number of entries parsed from APKINDEX
+    value: ${{ steps.reconcile.outputs.index-entries }}
+  pool-orphans:
+    description: Number of pool objects absent from the index (report only)
+    value: ${{ steps.reconcile.outputs.pool-orphans }}
+
 runs:
   using: composite
   steps:
@@ -30,6 +38,7 @@ runs:
       uses: nexaflow-internal/actions/setup-rclone@v1
 
     - name: Reconcile pool and index
+      id: reconcile
       shell: bash
       env:
         BASE_URL: ${{ inputs.base-url }}
@@ -142,9 +151,16 @@ runs:
           echo "WARN[D]: EXPECTED_KEYRING_SHA256 not set, keyring check skipped" 1>&2
         fi
 
+        orphans=$(wc -l < "$tmp/orphans" | tr -d ' ')
         echo "apk-reconcile: $count index entries ($ARCH)"
+        # Outputs let a caller assert the same numbers that go into the step
+        # summary; GITHUB_STEP_SUMMARY itself is scoped to this step.
+        if [ -n "${GITHUB_OUTPUT:-}" ]; then
+          printf 'index-entries=%s\n' "$count" >> "$GITHUB_OUTPUT"
+          printf 'pool-orphans=%s\n' "$orphans" >> "$GITHUB_OUTPUT"
+        fi
         if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
           printf '### reconcile %s\n\n- index entries: %s\n- pool orphans (report): %s\n' \
-            "$ARCH" "$count" "$(wc -l < "$tmp/orphans" | tr -d ' ')" >> "$GITHUB_STEP_SUMMARY"
+            "$ARCH" "$count" "$orphans" >> "$GITHUB_STEP_SUMMARY"
         fi
         exit "$rc"

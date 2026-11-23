@@ -278,6 +278,7 @@ jobs:
           ! grep -q '^P:fixture-removed-legacy$' "$RUNNER_TEMP/APKINDEX.fixture"
 
       - name: apk-reconcile
+        id: reconcile
         uses: ./apk-reconcile
         with:
           base-url: https://dl.nexaflow.by
@@ -288,10 +289,13 @@ jobs:
 
       - name: verify A-D summary
         shell: bash
+        env:
+          INDEX_ENTRIES: ${{ steps.reconcile.outputs.index-entries }}
+          POOL_ORPHANS: ${{ steps.reconcile.outputs.pool-orphans }}
         run: |
           set -euo pipefail
-          cat "$GITHUB_STEP_SUMMARY"
-          grep -q '^### reconcile x86_64$' "$GITHUB_STEP_SUMMARY"
-          grep -q '^- index entries: 2$' "$GITHUB_STEP_SUMMARY"
-          grep -q '^- pool orphans (report): 1$' "$GITHUB_STEP_SUMMARY"
+          echo "index entries: $INDEX_ENTRIES"
+          echo "pool orphans (report): $POOL_ORPHANS"
+          test "$INDEX_ENTRIES" = 2
+          test "$POOL_ORPHANS" = 1
           echo "apk-reconcile: dry-run A-D verification OK (no S3 env supplied)"

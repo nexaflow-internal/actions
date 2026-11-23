@@ -85,10 +85,10 @@ runs:
   using: composite
   steps:
     - name: Setup melange
-      uses: nexaflow-internal/actions/setup-melange@main
+      uses: nexaflow-internal/actions/setup-melange@v2
 
     - name: Setup bubblewrap
-      uses: nexaflow-internal/actions/setup-bubblewrap@main
+      uses: nexaflow-internal/actions/setup-bubblewrap@v2
 
     - name: Prepare signing key
       shell: bash

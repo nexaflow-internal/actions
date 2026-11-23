@@ -116,4 +116,4 @@ jobs:
       - name: verify setup-melange
         run: |
           melange version | head -1
-          melange version | head -1 | grep -q '0\.64\.0'
+          melange version | grep -qE 'GitVersion:[[:space:]]+v?0\.64\.0'

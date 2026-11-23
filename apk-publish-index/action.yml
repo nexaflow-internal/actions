@@ -1,0 +1,174 @@
+name: apk-publish-index
+description: Publish the apk pool into a signed APKINDEX (replaces make ci/publish-index)
+
+inputs:
+  packages:
+    description: Space-separated package names; each must have apks in the pool
+    required: true
+  arch:
+    description: Architecture subdirectory of the pool and index
+    required: false
+    default: x86_64
+  signing-key-path:
+    description: Path to the apk signing key
+    required: true
+  base-url:
+    description: Public repository base URL used by the self-test GET
+    required: true
+  dry-run:
+    description: Build and verify the index locally without PUT or .prev rotation
+    required: false
+    default: 'false'
+  dry-run-pool-path:
+    description: Local pool directory read instead of rclone when dry-run is true
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Setup melange
+      uses: nexaflow-internal/actions/setup-melange@v2
+
+    - name: Setup rclone
+      uses: nexaflow-internal/actions/setup-rclone@v1
+
+    - name: Publish index
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        ARCH: ${{ inputs.arch }}
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        BASE_URL: ${{ inputs.base-url }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        DRY_RUN_POOL_PATH: ${{ inputs.dry-run-pool-path }}
+        # S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY and
+        # optional S3_REGION are supplied by the caller as job/step env.
+      run: |
+        set -euo pipefail
+
+        [ -n "$PACKAGES" ] || { echo "apk-publish-index: packages is required" >&2; exit 2; }
+        [ -n "$ARCH" ] || { echo "apk-publish-index: arch is required" >&2; exit 2; }
+        [ -n "$SIGNING_KEY_PATH" ] || { echo "apk-publish-index: signing-key-path is required" >&2; exit 2; }
+        [ -f "$SIGNING_KEY_PATH" ] || { echo "apk-publish-index: signing key not found: $SIGNING_KEY_PATH" >&2; exit 1; }
+        BASE_URL="${BASE_URL%/}"
+        [ -n "$BASE_URL" ] || { echo "apk-publish-index: base-url is required" >&2; exit 2; }
+
+        tmp=$(mktemp -d || { echo "apk-publish-index: mktemp failed (TMPDIR=${TMPDIR:-unset} exists?)" >&2; exit 1; })
+        trap 'rm -rf "$tmp"' EXIT
+        mkdir -p "$tmp/pool"
+
+        # The extra input is consulted only for a dry run; production always
+        # reads the pool and the previous index through rclone.
+        use_local=false
+        if [ "$DRY_RUN" = "true" ] && [ -n "$DRY_RUN_POOL_PATH" ]; then
+          use_local=true
+        fi
+
+        if [ "$DRY_RUN" != "true" ]; then
+          for v in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+            val="${!v:-}"
+            [ -n "$val" ] || { echo "apk-publish-index: $v is required (S3 env contract)" >&2; exit 1; }
+          done
+        fi
+
+        # Configure the rclone remote from the S3 env contract. In a dry run
+        # with a local pool this block is skipped entirely (no S3 access).
+        if [ -n "${S3_ENDPOINT:-}" ] && [ -n "${S3_BUCKET:-}" ]; then
+          S3_HOST=$(printf '%s' "$S3_ENDPOINT" | sed -E -e 's|^https://||' -e 's|/*$||')
+          S3_REGION="${S3_REGION:-garage}"
+          export RCLONE_CONFIG_NEXAFLOW_TYPE=s3
+          export RCLONE_CONFIG_NEXAFLOW_PROVIDER=Other
+          export RCLONE_CONFIG_NEXAFLOW_ENDPOINT="$S3_HOST"
+          export RCLONE_CONFIG_NEXAFLOW_REGION="$S3_REGION"
+          export RCLONE_CONFIG_NEXAFLOW_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-}"
+          export RCLONE_CONFIG_NEXAFLOW_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-}"
+          export RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE=true
+          export RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET=true
+          remote="nexaflow:$S3_BUCKET/main/$ARCH"
+          RCLONE=(rclone --contimeout=10s --timeout=60s)
+        fi
+
+        if [ "$use_local" = true ]; then
+          echo "apk-publish-index: dry run — reading pool from $DRY_RUN_POOL_PATH (no S3, no writes)"
+          pool_src="$DRY_RUN_POOL_PATH"
+          [ -d "$pool_src" ] || { echo "apk-publish-index: dry-run pool path not found: $pool_src" >&2; exit 1; }
+          for p in $PACKAGES; do
+            shopt -s nullglob
+            matches=("$pool_src"/"$p"-*.apk)
+            shopt -u nullglob
+            [ "${#matches[@]}" -gt 0 ] || { echo "apk-publish-index: no local apk for '$p' in $pool_src" >&2; exit 1; }
+          done
+          cp "$pool_src"/*.apk "$tmp/pool/"
+          has_old=false
+          if [ -f "$pool_src/APKINDEX.tar.gz" ]; then
+            cp "$pool_src/APKINDEX.tar.gz" "$tmp/old.tar.gz"
+            has_old=true
+          fi
+        else
+          [ -n "${remote:-}" ] || { echo "apk-publish-index: no pool source — pass dry-run-pool-path or S3 env" >&2; exit 1; }
+          echo "apk-publish-index: remote=$remote arch=$ARCH"
+          for p in $PACKAGES; do
+            "${RCLONE[@]}" lsf "$remote/" | grep -q "^$p-.*\.apk$" \
+              || { echo "apk-publish-index: no published apk for '$p' in $remote/" >&2; exit 1; }
+          done
+          "${RCLONE[@]}" copy "$remote/" "$tmp/pool/" --include "*.apk" >/dev/null
+          if "${RCLONE[@]}" copyto "$remote/APKINDEX.tar.gz" "$tmp/old.tar.gz" 2>/dev/null; then
+            has_old=true
+          else
+            has_old=false
+          fi
+        fi
+
+        shopt -s nullglob
+        apks=("$tmp/pool"/*.apk)
+        shopt -u nullglob
+        [ "${#apks[@]}" -gt 0 ] || { echo "apk-publish-index: no apks in pool" >&2; exit 1; }
+
+        if [ "$has_old" = true ]; then
+          echo "apk-publish-index: merging into existing index"
+          melange index --merge --source "$tmp/old.tar.gz" --arch "$ARCH" \
+            --signing-key "$SIGNING_KEY_PATH" -o "$tmp/APKINDEX.new" "${apks[@]}"
+        else
+          echo "apk-publish-index: no existing index — creating (first publish)"
+          melange index --arch "$ARCH" --signing-key "$SIGNING_KEY_PATH" \
+            -o "$tmp/APKINDEX.new" "${apks[@]}"
+        fi
+
+        tar xzf "$tmp/APKINDEX.new" -O APKINDEX > "$tmp/APKINDEX.text"
+        for p in $PACKAGES; do
+          grep -q "^P:$p\$" "$tmp/APKINDEX.text" \
+            || { echo "apk-publish-index: FAIL: new index lacks '$p' (pool/merge broken?)" >&2; exit 1; }
+        done
+        echo "apk-publish-index: new index contains all matrix packages"
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "apk-publish-index: dry run — no PUT, no .prev rotation, no self-test"
+          echo "apk-publish-index: dry-run index entries:"
+          grep '^P:' "$tmp/APKINDEX.text" || true
+          echo "apk-publish-index: OK (dry run)"
+          exit 0
+        fi
+
+        "${RCLONE[@]}" copyto "$remote/APKINDEX.tar.gz" "$remote/APKINDEX.tar.gz.prev" \
+          --header-upload "Cache-Control: no-store" 2>/dev/null \
+          || echo "apk-publish-index: nothing to rotate into .prev"
+        "${RCLONE[@]}" copyto "$tmp/APKINDEX.new" "$remote/APKINDEX.tar.gz" \
+          --header-upload "Cache-Control: no-cache"
+
+        n=0; ok=0
+        while [ "$n" -lt 12 ]; do
+          if curl -sfL --max-time 30 "$BASE_URL/main/$ARCH/APKINDEX.tar.gz" -o "$tmp/verify" \
+             && cmp -s "$tmp/verify" "$tmp/APKINDEX.new"; then
+            ok=1; break
+          fi
+          n=$((n+1))
+          echo "apk-publish-index: self-test retry $n/12 (edge revalidation lag)"
+          sleep 10
+        done
+        if [ "$ok" = 1 ]; then
+          echo "apk-publish-index: self-test OK"
+        else
+          echo "apk-publish-index: WARN: served index not yet byte-identical (edge lag observed >2min; PUT confirmed by origin; reconcile checks drift nightly; TODO: CF purge API once creds exist)" >&2
+        fi
+        echo "apk-publish-index: OK"

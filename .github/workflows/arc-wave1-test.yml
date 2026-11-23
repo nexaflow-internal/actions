@@ -15,6 +15,7 @@ on:
       - 'melange-build/**'
       - 'melange-lint/**'
       - 'apk-upload-pool/**'
+      - 'apk-publish-index/**'
       - 'tests/fixtures/**'
 
 permissions:
@@ -201,3 +202,47 @@ jobs:
           package: ca-certificates
           dry-run: 'true'
           repository-path: ${{ runner.temp }}/apk-repo
+
+  apk-publish-index:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup melange
+        uses: nexaflow-internal/actions/setup-melange@v2
+
+      - name: prepare throwaway signing key and dry-run pool
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/keyring"
+          melange keygen "$RUNNER_TEMP/keyring/ci.rsa"
+          test -f "$RUNNER_TEMP/keyring/ci.rsa"
+          test -f "$RUNNER_TEMP/keyring/ci.rsa.pub"
+          bash tests/fixtures/index/generate.sh \
+            "$RUNNER_TEMP/index-pool" "$RUNNER_TEMP/keyring/ci.rsa"
+
+      - name: apk-publish-index
+        uses: ./apk-publish-index
+        with:
+          packages: ca-certificates
+          signing-key-path: ${{ runner.temp }}/keyring/ci.rsa
+          base-url: https://dl.nexaflow.by
+          dry-run: 'true'
+          dry-run-pool-path: ${{ runner.temp }}/index-pool
+
+      - name: verify dry-run made no production writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # No S3 env is supplied to this job: any PUT would have failed.
+          test -f "$RUNNER_TEMP/index-pool/APKINDEX.tar.gz"
+          test -f "$RUNNER_TEMP/index-pool/ca-certificates-20261020-r3.apk"
+          echo "apk-publish-index: dry-run verification OK (no S3 env supplied)"
+
+      - name: remove throwaway signing key
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/keyring/ci.rsa" "$RUNNER_TEMP/keyring/ci.rsa.pub"

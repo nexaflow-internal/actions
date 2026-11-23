@@ -1,0 +1,282 @@
+name: melange-build
+description: Build, index and test one melange package (replaces make ci/build)
+
+inputs:
+  config:
+    description: Path to the melange package manifest
+    required: true
+  package:
+    description: Package name, used for source/workspace directories
+    required: true
+  arch:
+    description: Architecture to build and test for
+    required: false
+    default: x86_64
+  repository-path:
+    description: Root of the local apk repository
+    required: false
+    default: ${{ github.workspace }}/../pkgs-local
+  signing-key-path:
+    description: Path to the apk signing key
+    required: false
+    default: ${{ runner.temp }}/keyring/ci.rsa
+  sign-with-temporary-key:
+    description: Generate a throwaway key and delete it after the build
+    required: false
+    default: 'true'
+  base-repository:
+    description: Optional base repository appended to build/test environments
+    required: false
+    default: ''
+  base-keyring:
+    description: Optional base keyring appended to build/test environments
+    required: false
+    default: ''
+  extra-repository:
+    description: Optional extra repository appended to build/test environments
+    required: false
+    default: ''
+  workspace-dir:
+    description: Root of the melange build/test workspaces
+    required: false
+    default: ${{ runner.temp }}/melange-ws
+  cache-dir:
+    description: Melange input and apk cache directory
+    required: false
+    default: ${{ runner.temp }}/melange-cache
+  namespace:
+    description: Namespace used in package URL SBOMs
+    required: false
+    default: nexaflow
+  runner:
+    description: Melange runner
+    required: false
+    default: bubblewrap
+  git-repo-url:
+    description: Git repository URL recorded in package provenance
+    required: false
+    default: https://github.com/nexaflow-internal/packages
+  pipeline-dir:
+    description: Directory with custom melange pipelines
+    required: false
+    default: ./pipelines
+  env-files:
+    description: Comma-separated build env files
+    required: false
+    default: build-x86_64.env,build-common.env
+  package-append:
+    description: Extra package installed into the build environment
+    required: false
+    default: busybox
+  test-package-append:
+    description: Extra package installed into the test guest
+    required: false
+    default: mara-base
+  license:
+    description: License recorded for the build manifest
+    required: false
+    default: Apache-2.0
+  cleanup:
+    description: Pass melange cleanup flags
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup melange
+      uses: nexaflow-internal/actions/setup-melange@main
+
+    - name: Setup bubblewrap
+      uses: nexaflow-internal/actions/setup-bubblewrap@main
+
+    - name: Prepare signing key
+      shell: bash
+      env:
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        SIGN_WITH_TEMPORARY_KEY: ${{ inputs.sign-with-temporary-key }}
+        TMPDIR: ${{ runner.temp }}/melange-tmp
+        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$SIGNING_KEY_PATH")" "$TMPDIR"
+        if [ "$SIGN_WITH_TEMPORARY_KEY" = "true" ]; then
+          melange keygen "$SIGNING_KEY_PATH"
+        else
+          [ -f "$SIGNING_KEY_PATH" ] || { echo "signing key not found: $SIGNING_KEY_PATH" >&2; exit 1; }
+          [ -f "$SIGNING_KEY_PATH.pub" ] || { echo "public key not found: $SIGNING_KEY_PATH.pub" >&2; exit 1; }
+        fi
+        [ -f "$SIGNING_KEY_PATH" ] && [ -f "$SIGNING_KEY_PATH.pub" ]
+
+    - name: Prepare build directories
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+        PACKAGE: ${{ inputs.package }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        WORKSPACE_DIR: ${{ inputs.workspace-dir }}
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        TMPDIR: ${{ runner.temp }}/melange-tmp
+        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
+      run: |
+        set -euo pipefail
+        rm -rf "$REPOSITORY_PATH/$ARCH"
+        mkdir -p "$REPOSITORY_PATH/$ARCH" "$WORKSPACE_DIR" "$CACHE_DIR" "$TMPDIR" "./$PACKAGE"
+        echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
+        echo "MELANGE_TMPDIR=$MELANGE_TMPDIR" >> "$GITHUB_ENV"
+
+    - name: Build package
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        PACKAGE: ${{ inputs.package }}
+        ARCH: ${{ inputs.arch }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        WORKSPACE_DIR: ${{ inputs.workspace-dir }}
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        NAMESPACE: ${{ inputs.namespace }}
+        RUNNER: ${{ inputs.runner }}
+        GIT_REPO_URL: ${{ inputs.git-repo-url }}
+        PIPELINE_DIR: ${{ inputs.pipeline-dir }}
+        ENV_FILES: ${{ inputs.env-files }}
+        PACKAGE_APPEND: ${{ inputs.package-append }}
+        LICENSE: ${{ inputs.license }}
+        CLEANUP: ${{ inputs.cleanup }}
+        BASE_REPOSITORY: ${{ inputs.base-repository }}
+        BASE_KEYRING: ${{ inputs.base-keyring }}
+        EXTRA_REPOSITORY: ${{ inputs.extra-repository }}
+        TMPDIR: ${{ runner.temp }}/melange-tmp
+        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
+      run: |
+        set -euo pipefail
+        args=(
+          "$CONFIG"
+          --runner "$RUNNER"
+          --arch "$ARCH"
+          --apk-cache-dir "$CACHE_DIR"
+          --cache-dir "$CACHE_DIR"
+          --git-repo-url "$GIT_REPO_URL"
+          --keyring-append "$SIGNING_KEY_PATH.pub"
+          --license "$LICENSE"
+          --namespace "$NAMESPACE"
+          --package-append "$PACKAGE_APPEND"
+          --pipeline-dir "$PIPELINE_DIR"
+          --repository-append "$REPOSITORY_PATH"
+          --signing-key "$SIGNING_KEY_PATH"
+          --out-dir "$REPOSITORY_PATH"
+          --workspace-dir "$WORKSPACE_DIR/build-ws/$PACKAGE"
+          --source-dir "./$PACKAGE"
+        )
+        if [ "$CLEANUP" = "true" ]; then args+=(--cleanup); fi
+        IFS=',' read -r -a env_files <<< "$ENV_FILES"
+        for f in "${env_files[@]}"; do
+          [ -n "$f" ] || continue
+          [ -f "$f" ] || { echo "env file not found: $f" >&2; exit 1; }
+          args+=(--env-file "$f")
+        done
+        if [ -n "$BASE_KEYRING" ]; then args+=(--keyring-append "$BASE_KEYRING"); fi
+        if [ -n "$BASE_REPOSITORY" ]; then args+=(--repository-append "$BASE_REPOSITORY"); fi
+        if [ -n "$EXTRA_REPOSITORY" ]; then args+=(--repository-append "$EXTRA_REPOSITORY"); fi
+        melange build "${args[@]}"
+
+    - name: Index built packages
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+        PACKAGE: ${{ inputs.package }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        TMPDIR: ${{ runner.temp }}/melange-tmp
+        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
+      run: |
+        set -euo pipefail
+        repo="$REPOSITORY_PATH/$ARCH"
+        mkdir -p "$repo"
+        rm -f "$repo/APKINDEX.tar.gz"
+        shopt -s nullglob
+        apks=("$repo"/*.apk)
+        shopt -u nullglob
+        [ "${#apks[@]}" -gt 0 ] || { echo "no apks built in $repo" >&2; exit 1; }
+        melange index --signing-key "$SIGNING_KEY_PATH" -o "$repo/APKINDEX.tar.gz" "${apks[@]}"
+
+    - name: Stage local packages for apko.yaml
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+        PACKAGE: ${{ inputs.package }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        TMPDIR: ${{ runner.temp }}/melange-tmp
+        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
+      run: |
+        set -euo pipefail
+        if [ ! -f "./$PACKAGE/apko.yaml" ]; then
+          echo "no ./$PACKAGE/apko.yaml — skipping local-packages staging"
+          exit 0
+        fi
+        repo="$REPOSITORY_PATH/$ARCH"
+        shopt -s nullglob
+        apks=("$repo"/"$PACKAGE"-*.apk)
+        shopt -u nullglob
+        [ "${#apks[@]}" -gt 0 ] || { echo "$PACKAGE has apko.yaml but no built apks in $repo" >&2; exit 1; }
+        stage="./$PACKAGE/local-packages/$ARCH"
+        rm -rf "./$PACKAGE/local-packages"
+        mkdir -p "$stage"
+        cp "${apks[@]}" "$stage/"
+        melange index --signing-key "$SIGNING_KEY_PATH" -o "$stage/APKINDEX.tar.gz" "$stage"/*.apk >/dev/null
+
+    - name: Test package
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        PACKAGE: ${{ inputs.package }}
+        ARCH: ${{ inputs.arch }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        WORKSPACE_DIR: ${{ inputs.workspace-dir }}
+        RUNNER: ${{ inputs.runner }}
+        PIPELINE_DIR: ${{ inputs.pipeline-dir }}
+        TEST_PACKAGE_APPEND: ${{ inputs.test-package-append }}
+        BASE_REPOSITORY: ${{ inputs.base-repository }}
+        BASE_KEYRING: ${{ inputs.base-keyring }}
+        EXTRA_REPOSITORY: ${{ inputs.extra-repository }}
+        TMPDIR: ${{ runner.temp }}/melange-tmp
+        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
+      run: |
+        set -euo pipefail
+        args=(
+          "$CONFIG"
+          --runner "$RUNNER"
+          --arch "$ARCH"
+          --repository-append "$REPOSITORY_PATH"
+          --keyring-append "$SIGNING_KEY_PATH.pub"
+          --pipeline-dirs "$PIPELINE_DIR"
+          --test-package-append "$TEST_PACKAGE_APPEND"
+          --workspace-dir "$WORKSPACE_DIR/test-ws/$PACKAGE"
+          --source-dir "./$PACKAGE"
+        )
+        if [ -n "$BASE_KEYRING" ]; then args+=(--keyring-append "$BASE_KEYRING"); fi
+        if [ -n "$BASE_REPOSITORY" ]; then args+=(--repository-append "$BASE_REPOSITORY"); fi
+        if [ -n "$EXTRA_REPOSITORY" ]; then args+=(--repository-append "$EXTRA_REPOSITORY"); fi
+        melange test "${args[@]}"
+
+    - name: Restore ownership and remove throwaway key
+      if: always()
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        WORKSPACE_DIR: ${{ inputs.workspace-dir }}
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        SIGN_WITH_TEMPORARY_KEY: ${{ inputs.sign-with-temporary-key }}
+        TMPDIR: ${{ runner.temp }}/melange-tmp
+        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
+      run: |
+        for dir in "$REPOSITORY_PATH" "$WORKSPACE_DIR"; do
+          if [ -d "$dir" ]; then sudo chown -R "$(id -u):$(id -g)" "$dir" || true; fi
+        done
+        if [ -f "./$PACKAGE/apko.yaml" ]; then rm -rf "./$PACKAGE/local-packages"; fi
+        if [ "$SIGN_WITH_TEMPORARY_KEY" = "true" ]; then
+          rm -f "$SIGNING_KEY_PATH" "$SIGNING_KEY_PATH.pub"
+        fi

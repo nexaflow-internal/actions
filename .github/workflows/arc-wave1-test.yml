@@ -16,6 +16,7 @@ on:
       - 'melange-lint/**'
       - 'apk-upload-pool/**'
       - 'apk-publish-index/**'
+      - 'apk-reconcile/**'
       - 'tests/fixtures/**'
 
 permissions:
@@ -246,3 +247,51 @@ jobs:
         shell: bash
         run: |
           rm -f "$RUNNER_TEMP/keyring/ci.rsa" "$RUNNER_TEMP/keyring/ci.rsa.pub"
+
+  apk-reconcile:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: verify reconcile fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture=tests/fixtures/reconcile
+          for f in APKINDEX.tar.gz fixture-alpha-1.0-r0.apk \
+            fixture-beta-2.0-r0.apk fixture-orphan-3.0-r0.apk \
+            withdrawn-packages.txt nexaflow.rsa.pub; do
+            test -f "$fixture/$f"
+          done
+          # D: the expected sha must be the sha of the local stand-in .pub.
+          test "$(sha256sum "$fixture/nexaflow.rsa.pub" | cut -d' ' -f1)" = \
+            "07ebd09bdbb3b28435b3fba48d42c7527ea27023d2a7da1d9d66800fa5c7efd5"
+          tar xzf "$fixture/APKINDEX.tar.gz" -O APKINDEX > "$RUNNER_TEMP/APKINDEX.fixture"
+          # A: both index entries have pool objects.
+          grep -q '^P:fixture-alpha$' "$RUNNER_TEMP/APKINDEX.fixture"
+          grep -q '^P:fixture-beta$' "$RUNNER_TEMP/APKINDEX.fixture"
+          # B: one extra pool apk is present so the orphan report is exercised.
+          test -f "$fixture/fixture-orphan-3.0-r0.apk"
+          # C: withdrawn names must not be indexed.
+          ! grep -q '^P:fixture-withdrawn$' "$RUNNER_TEMP/APKINDEX.fixture"
+          ! grep -q '^P:fixture-removed-legacy$' "$RUNNER_TEMP/APKINDEX.fixture"
+
+      - name: apk-reconcile
+        uses: ./apk-reconcile
+        with:
+          base-url: https://dl.nexaflow.by
+          arch: x86_64
+          expected-keyring-sha256: 07ebd09bdbb3b28435b3fba48d42c7527ea27023d2a7da1d9d66800fa5c7efd5
+          dry-run: 'true'
+          dry-run-pool-path: tests/fixtures/reconcile
+
+      - name: verify A-D summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat "$GITHUB_STEP_SUMMARY"
+          grep -q '^### reconcile x86_64$' "$GITHUB_STEP_SUMMARY"
+          grep -q '^- index entries: 2$' "$GITHUB_STEP_SUMMARY"
+          grep -q '^- pool orphans (report): 1$' "$GITHUB_STEP_SUMMARY"
+          echo "apk-reconcile: dry-run A-D verification OK (no S3 env supplied)"

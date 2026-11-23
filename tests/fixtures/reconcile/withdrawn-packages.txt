@@ -1,0 +1,4 @@
+# Withdrawn package names for the apk-reconcile dry-run fixture (check C).
+# These names must be absent from APKINDEX; comments and blank lines are ignored.
+fixture-withdrawn
+fixture-removed-legacy

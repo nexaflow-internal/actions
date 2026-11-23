@@ -1,0 +1,150 @@
+name: apk-reconcile
+description: Read-only nightly invariant check of the apk pool and index (replaces make ci/reconcile)
+
+inputs:
+  base-url:
+    description: Public repository base URL; required when dry-run is false (served .pub check)
+    required: false
+    default: ''
+  arch:
+    description: Architecture subdirectory of the pool and index
+    required: false
+    default: x86_64
+  expected-keyring-sha256:
+    description: Expected SHA-256 of the served keyring .pub; empty skips check D with a WARN
+    required: false
+    default: ''
+  dry-run:
+    description: Read a local pool fixture and a local .pub instead of S3/curl; this action never writes
+    required: false
+    default: 'false'
+  dry-run-pool-path:
+    description: Local pool directory read instead of rclone when dry-run is true
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Setup rclone
+      uses: nexaflow-internal/actions/setup-rclone@v1
+
+    - name: Reconcile pool and index
+      shell: bash
+      env:
+        BASE_URL: ${{ inputs.base-url }}
+        ARCH: ${{ inputs.arch }}
+        EXPECTED_KEYRING_SHA256: ${{ inputs.expected-keyring-sha256 }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        DRY_RUN_POOL_PATH: ${{ inputs.dry-run-pool-path }}
+        # S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY and
+        # optional S3_REGION are supplied by the caller as job/step env.
+      run: |
+        set -euo pipefail
+
+        [ -n "$ARCH" ] || { echo "apk-reconcile: arch is required" >&2; exit 2; }
+        BASE_URL="${BASE_URL%/}"
+        if [ "$DRY_RUN" = "true" ]; then
+          [ -n "$DRY_RUN_POOL_PATH" ] || { echo "apk-reconcile: dry-run-pool-path is required when dry-run=true" >&2; exit 2; }
+          [ -d "$DRY_RUN_POOL_PATH" ] || { echo "apk-reconcile: dry-run pool path not found: $DRY_RUN_POOL_PATH" >&2; exit 1; }
+          pool_src="$DRY_RUN_POOL_PATH"
+          echo "apk-reconcile: dry run — reading pool from $pool_src (no S3, no writes)"
+        else
+          [ -n "$BASE_URL" ] || { echo "apk-reconcile: base-url is required" >&2; exit 2; }
+          for v in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+            val="${!v:-}"
+            [ -n "$val" ] || { echo "apk-reconcile: $v is required (S3 env contract)" >&2; exit 1; }
+          done
+          S3_HOST=$(printf '%s' "$S3_ENDPOINT" | sed -E -e 's|^https://||' -e 's|/*$||')
+          S3_REGION="${S3_REGION:-garage}"
+          export RCLONE_CONFIG_NEXAFLOW_TYPE=s3
+          export RCLONE_CONFIG_NEXAFLOW_PROVIDER=Other
+          export RCLONE_CONFIG_NEXAFLOW_ENDPOINT="$S3_HOST"
+          export RCLONE_CONFIG_NEXAFLOW_REGION="$S3_REGION"
+          export RCLONE_CONFIG_NEXAFLOW_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
+          export RCLONE_CONFIG_NEXAFLOW_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
+          export RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE=true
+          export RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET=true
+          remote="nexaflow:$S3_BUCKET/main/$ARCH"
+          RCLONE=(rclone --contimeout=10s --timeout=60s)
+          echo "apk-reconcile: remote=$remote arch=$ARCH"
+        fi
+
+        tmp=$(mktemp -d || { echo "apk-reconcile: mktemp failed (TMPDIR=${TMPDIR:-unset} exists?)" >&2; exit 1; })
+        trap 'rm -rf "$tmp"' EXIT
+        mkdir "$tmp/x"
+        rc=0
+
+        # make ci/reconcile: A — every index entry has a pool object.
+        if [ "$DRY_RUN" = "true" ]; then
+          cp "$pool_src/APKINDEX.tar.gz" "$tmp/APKINDEX.tar.gz" \
+            || { echo "FAIL[A]: cannot fetch $pool_src/APKINDEX.tar.gz" >&2; exit 1; }
+        else
+          "${RCLONE[@]}" copyto "$remote/APKINDEX.tar.gz" "$tmp/APKINDEX.tar.gz" \
+            || { echo "FAIL[A]: cannot fetch $remote/APKINDEX.tar.gz" >&2; exit 1; }
+        fi
+        tar xzf "$tmp/APKINDEX.tar.gz" -C "$tmp/x"
+        awk '/^P:/{p=substr($0,3)} /^V:/{v=substr($0,3)} /^$/{if(p!=""){print p"-"v".apk"; p=""; v=""}} END{if(p!="")print p"-"v".apk"}' "$tmp/x/APKINDEX" | sort -u > "$tmp/list"
+
+        count=0; while read -r name; do
+          count=$((count+1))
+          if [ "$DRY_RUN" = "true" ]; then
+            [ -f "$pool_src/$name" ] || { echo "FAIL[A]: index -> $name: object missing in pool" >&2; rc=1; }
+          else
+            "${RCLONE[@]}" size --json "$remote/$name" >/dev/null 2>&1 \
+              || { echo "FAIL[A]: index -> $name: object missing in pool" >&2; rc=1; }
+          fi
+        done < "$tmp/list"
+
+        # make ci/reconcile: B — pool orphans, report only (never repair).
+        if [ "$DRY_RUN" = "true" ]; then
+          (
+            cd "$pool_src"
+            shopt -s nullglob
+            apks=(*.apk)
+            if [ "${#apks[@]}" -gt 0 ]; then printf '%s\n' "${apks[@]}"; fi
+          ) | sort -u > "$tmp/pool"
+        else
+          "${RCLONE[@]}" lsf "$remote/" 2>/dev/null | grep '\.apk$' | sort -u > "$tmp/pool" || true
+        fi
+        comm -23 "$tmp/pool" "$tmp/list" | sed 's/^/orphan[B]: /' > "$tmp/orphans"
+        if [ -s "$tmp/orphans" ]; then cat "$tmp/orphans"; fi
+
+        # make ci/reconcile: C — withdrawn names must be absent from the index.
+        if [ "$DRY_RUN" = "true" ]; then
+          withdrawn="$pool_src/withdrawn-packages.txt"
+        else
+          withdrawn="withdrawn-packages.txt"
+        fi
+        if [ -f "$withdrawn" ]; then
+          while read -r w; do
+            case "$w" in ''|\#*) continue;; esac
+            if grep -q "^P:$w$" "$tmp/x/APKINDEX"; then
+              echo "FAIL[C]: withdrawn $w still indexed" >&2
+              rc=1
+            fi
+          done < "$withdrawn"
+        fi
+
+        # make ci/reconcile: D — served .pub sha256, WARN-only when no expected value.
+        if [ -n "$EXPECTED_KEYRING_SHA256" ]; then
+          served=''
+          if [ "$DRY_RUN" = "true" ]; then
+            served=$(sha256sum "$pool_src/nexaflow.rsa.pub" | cut -d' ' -f1) \
+              || { echo "FAIL[D]: served .pub unreadable" >&2; rc=1; }
+          else
+            served=$(curl -sfL --max-time 30 "$BASE_URL/keyring/nexaflow.rsa.pub" | sha256sum | cut -d' ' -f1) \
+              || { echo "FAIL[D]: served .pub unreadable" >&2; rc=1; }
+          fi
+          [ "$served" = "$EXPECTED_KEYRING_SHA256" ] \
+            || { echo "FAIL[D]: served .pub sha256 $served != expected $EXPECTED_KEYRING_SHA256" >&2; rc=1; }
+        else
+          echo "WARN[D]: EXPECTED_KEYRING_SHA256 not set, keyring check skipped" 1>&2
+        fi
+
+        echo "apk-reconcile: $count index entries ($ARCH)"
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          printf '### reconcile %s\n\n- index entries: %s\n- pool orphans (report): %s\n' \
+            "$ARCH" "$count" "$(wc -l < "$tmp/orphans" | tr -d ' ')" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit "$rc"

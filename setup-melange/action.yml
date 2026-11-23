@@ -1,0 +1,36 @@
+name: setup-melange
+description: Install chainguard-dev/melange into /usr/local/bin
+
+inputs:
+  version:
+    description: melange version to install
+    required: false
+    default: 0.64.0
+  checksum:
+    description: |
+      SHA-256 checksum of melange_<version>_linux_amd64.tar.gz.
+      When overriding version, callers must pass the matching checksum.
+    required: false
+    default: d8ae32eea4e0dc390e4a1e7d7a7740cf10f4a84675b792a2ff5417097e4ce317
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure wget
+      shell: bash
+      run: |
+        command -v wget || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends wget; }
+
+    - name: Download and verify melange
+      uses: nexaflow-internal/actions/wgetsum@v0
+      with:
+        url: https://github.com/chainguard-dev/melange/releases/download/v${{ inputs.version }}/melange_${{ inputs.version }}_linux_amd64.tar.gz
+        checksum: ${{ inputs.checksum }}
+        output: ${{ runner.temp }}/melange.tar.gz
+        wget-flags: "-c --tries=3 --timeout=30"
+
+    - name: Install melange
+      shell: bash
+      run: |
+        sudo tar xzf "$RUNNER_TEMP/melange.tar.gz" --strip-components=1 -C /usr/local/bin
+        melange version

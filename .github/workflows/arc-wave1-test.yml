@@ -14,6 +14,7 @@ on:
       - 'setup-bubblewrap/**'
       - 'melange-build/**'
       - 'melange-lint/**'
+      - 'apk-upload-pool/**'
       - 'tests/fixtures/**'
 
 permissions:
@@ -172,3 +173,31 @@ jobs:
         uses: ./melange-lint
         with:
           workdir: tests/fixtures/lint
+
+  apk-upload-pool:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: prepare dry-run fixture
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/lint/ca-certificates.yaml "$GITHUB_WORKSPACE/ca-certificates.yaml"
+          repo="$RUNNER_TEMP/apk-repo/x86_64"
+          mkdir -p "$repo"
+          for apk in \
+            ca-certificates-20261020-r3.apk \
+            ca-certificates-bundle-20261020-r3.apk \
+            ca-certificates-doc-20261020-r3.apk \
+            java-cacerts-20261020-r3.apk; do
+            printf 'fixture\n' > "$repo/$apk"
+          done
+          ls -l "$repo"
+
+      - name: apk-upload-pool
+        uses: ./apk-upload-pool
+        with:
+          package: ca-certificates
+          dry-run: 'true'
+          repository-path: ${{ runner.temp }}/apk-repo

@@ -1,0 +1,125 @@
+name: apk-upload-pool
+description: Publish a package's apks to the S3 pool (replaces make ci/upload-pool)
+
+inputs:
+  package:
+    description: Melange package name; reads <package>.yaml from the workspace root
+    required: true
+  repository-path:
+    description: Root of the local apk repository
+    required: false
+    default: ${{ github.workspace }}/../pkgs-local
+  arch:
+    description: Architecture subdirectory of the local repository and pool prefix
+    required: false
+    default: x86_64
+  dry-run:
+    description: Print the discovered apks and planned actions without any S3 access or writes
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup melange
+      uses: nexaflow-internal/actions/setup-melange@v2
+
+    - name: Setup rclone
+      uses: nexaflow-internal/actions/setup-rclone@v1
+
+    - name: Upload package apks
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        ARCH: ${{ inputs.arch }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        # S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY and
+        # optional S3_REGION are supplied by the caller as job/step env.
+      run: |
+        set -euo pipefail
+
+        [ -n "$PACKAGE" ] || { echo "apk-upload-pool: package is required" >&2; exit 2; }
+        manifest="$PACKAGE.yaml"
+        [ -f "$manifest" ] || { echo "apk-upload-pool: manifest not found: $manifest" >&2; exit 1; }
+        repo="$REPOSITORY_PATH/$ARCH"
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "apk-upload-pool: dry run — no S3 access, no writes"
+        else
+          for v in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+            val="${!v:-}"
+            [ -n "$val" ] || { echo "apk-upload-pool: $v is required (S3 env contract)" >&2; exit 1; }
+          done
+
+          # Accept both https://host (public edge) and http://host:port (LAN).
+          S3_HOST=$(printf '%s' "$S3_ENDPOINT" | sed -E -e 's|^https://||' -e 's|/*$||')
+          S3_REGION="${S3_REGION:-garage}"
+
+          export RCLONE_CONFIG_NEXAFLOW_TYPE=s3
+          export RCLONE_CONFIG_NEXAFLOW_PROVIDER=Other
+          export RCLONE_CONFIG_NEXAFLOW_ENDPOINT="$S3_HOST"
+          export RCLONE_CONFIG_NEXAFLOW_REGION="$S3_REGION"
+          export RCLONE_CONFIG_NEXAFLOW_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
+          export RCLONE_CONFIG_NEXAFLOW_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
+          export RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE=true
+          export RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET=true
+
+          remote="nexaflow:$S3_BUCKET/main/$ARCH"
+          RCLONE=(rclone --contimeout=10s --timeout=60s)
+        fi
+
+        subpackages=$(melange query "$manifest" '{{range .Subpackages}}{{.Name}} {{end}}')
+        names=("$PACKAGE")
+        for n in $subpackages; do names+=("$n"); done
+
+        echo "apk-upload-pool: manifest=$manifest arch=$ARCH repository=$repo"
+        echo "apk-upload-pool: discovered names: ${names[*]}"
+
+        shopt -s nullglob
+        declare -A seen=()
+        found=0
+        for name_pat in "${names[@]}"; do
+          for apk in "$repo"/"$name_pat"-*.apk; do
+            [ -f "$apk" ] || continue
+            [ -z "${seen[$apk]:-}" ] || continue
+            seen[$apk]=1
+            found=1
+            name=$(basename "$apk")
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "apk-upload-pool: [dry-run] $name — would PUT if absent (remote size check skipped)"
+              continue
+            fi
+
+            local_size=$(wc -c < "$apk" | tr -d ' ')
+            remote_object="$remote/$name"
+            remote_size=$("${RCLONE[@]}" size --json "$remote_object" 2>/dev/null | jq -r '.bytes // empty' 2>/dev/null) || remote_size=''
+            if [ -n "$remote_size" ]; then
+              if [ "$remote_size" = "$local_size" ]; then
+                echo "apk-upload-pool: $name already published, skip"
+              else
+                echo "apk-upload-pool: FAIL: $name exists in pool with size $remote_size != local $local_size — immutable apk (§0.1)" >&2
+                exit 1
+              fi
+            else
+              echo "apk-upload-pool: PUT $name"
+              "${RCLONE[@]}" copyto \
+                --header-upload "Cache-Control: public, max-age=31536000, immutable" \
+                --header-upload "Content-Type: application/octet-stream" \
+                "$apk" "$remote_object"
+            fi
+          done
+        done
+        shopt -u nullglob
+
+        if [ "$found" -eq 0 ]; then
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "apk-upload-pool: no apks for $PACKAGE in $repo (dry-run: nothing to do)"
+          else
+            echo "apk-upload-pool: no apks for $PACKAGE in $repo" >&2
+            exit 1
+          fi
+        fi
+
+        echo "apk-upload-pool: done"

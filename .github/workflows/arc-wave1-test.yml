@@ -1,4 +1,4 @@
-name: ARC wave1 actions test
+name: ARC actions test
 
 on:
   workflow_dispatch:
@@ -10,6 +10,7 @@ on:
       - 'setup-go/**'
       - 'setup-yam/**'
       - 'setup-rclone/**'
+      - 'setup-melange/**'
 
 permissions:
   contents: read
@@ -102,3 +103,17 @@ jobs:
         run: |
           rclone version | head -1
           rclone version | head -1 | grep -q 'rclone v1\.60\.1'
+
+  setup-melange:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-melange
+        uses: ./setup-melange
+
+      - name: verify setup-melange
+        run: |
+          melange version | head -1
+          melange version | head -1 | grep -q '0\.64\.0'

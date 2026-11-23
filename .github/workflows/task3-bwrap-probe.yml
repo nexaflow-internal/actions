@@ -1,0 +1,26 @@
+name: Task 3 bwrap probe
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: nexaflow-default
+    steps:
+      - name: setup-bubblewrap
+        uses: nexaflow-internal/actions/setup-bubblewrap@main
+
+      - name: probe bwrap mounts
+        run: |
+          set +e
+          echo "uid=$(id -u) gid=$(id -g)"
+          bwrap --unshare-user --bind / / true
+          echo "plain rc=$?"
+          bwrap --unshare-user --unshare-pid --proc /proc --bind / / true
+          echo "proc rc=$?"
+          bwrap --unshare-user --unshare-pid --dev /dev --proc /proc --ro-bind /sys /sys --bind / / true
+          echo "melange-like rc=$?"
+          bwrap --unshare-user --unshare-pid --dev /dev --proc /proc --ro-bind /sys /sys --uid 1000 --gid 1000 --bind / / true
+          echo "melange-like-uid rc=$?"

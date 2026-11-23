@@ -1,4 +1,4 @@
-name: Task 3 bwrap probe
+name: Task 3 runner probe
 
 on: workflow_dispatch
 
@@ -9,18 +9,15 @@ jobs:
   probe:
     runs-on: nexaflow-default
     steps:
-      - name: setup-bubblewrap
-        uses: nexaflow-internal/actions/setup-bubblewrap@main
-
-      - name: probe bwrap mounts
+      - name: probe runner capabilities
         run: |
           set +e
-          echo "uid=$(id -u) gid=$(id -g)"
-          bwrap --unshare-user --bind / / true
-          echo "plain rc=$?"
-          bwrap --unshare-user --unshare-pid --proc /proc --bind / / true
-          echo "proc rc=$?"
-          bwrap --unshare-user --unshare-pid --dev /dev --proc /proc --ro-bind /sys /sys --bind / / true
-          echo "melange-like rc=$?"
-          bwrap --unshare-user --unshare-pid --dev /dev --proc /proc --ro-bind /sys /sys --uid 1000 --gid 1000 --bind / / true
-          echo "melange-like-uid rc=$?"
+          echo "== identity"; id; uname -r
+          echo "== proc status"; grep -E 'Seccomp|CapEff|CapBnd|NoNewPrivs' /proc/self/status
+          echo "== apparmor userns"; cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1
+          echo "== userns/mountns options"; findmnt -no FSTYPE,OPTIONS /proc /sys /dev /tmp 2>&1
+          echo "== docker"; command -v docker; ls -l /var/run/docker.sock 2>&1; timeout 20 docker info --format '{{.ServerVersion}}' 2>&1; echo "docker rc=$?"
+          echo "== bwrap"; command -v bwrap; bwrap --version 2>&1
+          echo "== unshare -Urmpf --mount-proc"; unshare -Urmpf --mount-proc true 2>&1; echo "rc=$?"
+          echo "== unshare -Urm mount tmpfs"; unshare -Urm sh -c 'mkdir -p /tmp/mp && mount -t tmpfs tmpfs /tmp/mp && echo TMPFS_OK'; echo "rc=$?"
+          echo "== mount proc from userns"; unshare -Urmpf sh -c 'mount -t proc proc /proc && echo PROC_OK'; echo "rc=$?"

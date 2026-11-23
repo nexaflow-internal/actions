@@ -150,6 +150,9 @@ jobs:
           package: hello-fixture
           repository-path: ${{ runner.temp }}/apk-repo
           extra-repository: ''
+          env-files: ''
+          base-repository: https://packages.wolfi.dev/os
+          base-keyring: https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 
       - name: verify melange-build artifacts
         run: |

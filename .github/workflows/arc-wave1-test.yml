@@ -13,6 +13,7 @@ on:
       - 'setup-melange/**'
       - 'setup-bubblewrap/**'
       - 'melange-build/**'
+      - 'melange-lint/**'
       - 'tests/fixtures/**'
 
 permissions:
@@ -160,3 +161,14 @@ jobs:
           test -f "$RUNNER_TEMP/apk-repo/x86_64/APKINDEX.tar.gz"
           test ! -e "$RUNNER_TEMP/keyring/ci.rsa"
           ls -l "$RUNNER_TEMP/apk-repo/x86_64/"
+
+  melange-lint:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: melange-lint
+        uses: ./melange-lint
+        with:
+          workdir: tests/fixtures/lint

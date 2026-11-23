@@ -1,0 +1,19 @@
+name: melange-lint
+description: Lint all melange manifests in the workspace (replaces make ci/lint)
+
+inputs:
+  workdir:
+    description: Directory containing lint.sh and the manifests to check
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup yam
+      uses: nexaflow-internal/actions/setup-yam@v1
+
+    - name: Lint manifests
+      shell: bash
+      working-directory: ${{ inputs.workdir }}
+      run: LINT_CHECK=1 ./lint.sh *.yaml

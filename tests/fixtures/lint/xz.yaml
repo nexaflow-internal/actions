@@ -1,0 +1,136 @@
+package:
+  name: xz
+  version: "5.8.4"
+  epoch: 1
+  description: "Library and CLI tools for XZ and LZMA compressed files"
+  copyright:
+    - license: GPL-3.0-or-later
+  resources:
+    cpu: "3"
+    memory: 7Gi
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - libtool
+      - mara-baselayout
+pipeline:
+  # Bootstrap-era deviation (docs/deviations.md K2): release tarball instead
+  # of git + autogen.sh — autogen requires autopoint (gettext), not in the
+  # bootstrap yet. sha256 verified against GitHub release AND the upstream
+  # tarball hash recorded in the wolfi source cache. Switch back to
+  # git-checkout once a gettext package exists in this registry.
+  - uses: fetch
+    with:
+      uri: https://github.com/tukaani-project/xz/releases/download/v${{package.version}}/xz-${{package.version}}.tar.xz
+      expected-sha256: 4ce24038fd4221e0d13bc1a2de7a4db56e90b92b3bf75321f6c14be73f65de4b
+      extract: true
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --host=${{host.triplet.gnu}} \
+        --target=${{host.triplet.gnu}} \
+        --prefix=/usr \
+        --datadir=/usr/share
+  - uses: autoconf/make
+  - name: Run upstream test suite
+    runs: make check
+  - uses: autoconf/make-install
+  - uses: strip
+subpackages:
+  - name: "xz-dev"
+    description: "xz headers"
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - xz
+    test:
+      pipeline:
+        - uses: test/tw/devpackage
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+  - name: "xz-doc"
+    description: "xz documentation"
+    options:
+      no-depends: true
+    pipeline:
+      - uses: split/manpages
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/share/doc
+          mv ${{targets.destdir}}/usr/share/doc/xz ${{targets.subpkgdir}}/usr/share/doc/xz
+    test:
+      pipeline:
+        - uses: test/tw/docs
+test:
+  pipeline:
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          lzma
+          lzfgrep
+          xzcat
+          lzmore
+          lzmadec
+          lzgrep
+          xzless
+          xzgrep
+          xzegrep
+          unlzma
+          lzdiff
+          xzcmp
+          lzless
+          xzfgrep
+          lzcat
+          xzmore
+          lzcmp
+          unxz
+          xzdec
+          xzdiff
+          lzmainfo
+          lzegrep
+          xz
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          lzcat
+          lzcmp
+          lzdiff
+          lzegrep
+          lzfgrep
+          lzgrep
+          lzless
+          lzma
+          lzmadec
+          lzmainfo
+          lzmore
+          unlzma
+          unxz
+          xz
+          xzcat
+          xzcmp
+          xzdec
+          xzdiff
+          xzegrep
+          xzfgrep
+          xzgrep
+          xzless
+          xzmore
+    - name: Basic xz compression and decompression test
+      runs: |
+        echo "Hello, Wolfi!" > data.txt
+        cp data.txt data.bak
+        xz -z data.txt
+        xz -t data.txt.xz
+        xz -d data.txt.xz
+        cmp data.txt data.bak
+    - uses: test/tw/ldd-check
+update:
+  enabled: true
+  github:
+    identifier: tukaani-project/xz
+    strip-prefix: v

@@ -151,8 +151,8 @@ jobs:
           repository-path: ${{ runner.temp }}/apk-repo
           extra-repository: ''
           env-files: ''
-          base-repository: https://packages.wolfi.dev/os
-          base-keyring: https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+          base-repository: https://dl.nexaflow.by/main
+          base-keyring: https://dl.nexaflow.by/keyring/nexaflow.rsa.pub
 
       - name: verify melange-build artifacts
         run: |

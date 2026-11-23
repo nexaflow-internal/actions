@@ -80,6 +80,10 @@ inputs:
     description: Pass melange cleanup flags
     required: false
     default: 'true'
+  source-date-epoch:
+    description: SOURCE_DATE_EPOCH for reproducible builds (defaults to the last git commit time)
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -116,12 +120,21 @@ runs:
         REPOSITORY_PATH: ${{ inputs.repository-path }}
         WORKSPACE_DIR: ${{ inputs.workspace-dir }}
         CACHE_DIR: ${{ inputs.cache-dir }}
+        SOURCE_DATE_EPOCH_INPUT: ${{ inputs.source-date-epoch }}
         TMPDIR: ${{ runner.temp }}/melange-tmp
         MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
       run: |
         set -euo pipefail
         rm -rf "$REPOSITORY_PATH/$ARCH"
         mkdir -p "$REPOSITORY_PATH/$ARCH" "$WORKSPACE_DIR" "$CACHE_DIR" "$TMPDIR" "./$PACKAGE"
+        if [ -n "$SOURCE_DATE_EPOCH_INPUT" ]; then
+          SOURCE_DATE_EPOCH_VALUE="$SOURCE_DATE_EPOCH_INPUT"
+        else
+          SOURCE_DATE_EPOCH_VALUE="$(git log -1 --pretty=%ct 2>/dev/null || echo 0)"
+          [ -n "$SOURCE_DATE_EPOCH_VALUE" ] || SOURCE_DATE_EPOCH_VALUE=0
+        fi
+        echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH_VALUE" >> "$GITHUB_ENV"
+        echo "melange-build: SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH_VALUE"
         echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
         echo "MELANGE_TMPDIR=$MELANGE_TMPDIR" >> "$GITHUB_ENV"
 

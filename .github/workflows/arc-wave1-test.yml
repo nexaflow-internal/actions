@@ -11,6 +11,7 @@ on:
       - 'setup-yam/**'
       - 'setup-rclone/**'
       - 'setup-melange/**'
+      - 'setup-bubblewrap/**'
 
 permissions:
   contents: read
@@ -117,3 +118,19 @@ jobs:
         run: |
           melange version | head -1
           melange version | grep -qE 'GitVersion:[[:space:]]+v?0\.64\.0'
+
+  setup-bubblewrap:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-bubblewrap
+        uses: ./setup-bubblewrap
+
+      - name: verify setup-bubblewrap
+        run: |
+          bwrap --version | head -1
+          bwrap --version | grep -q '0\.9\.0'
+          bwrap --unshare-user --bind / / true
+          echo "bwrap userns check rc=$?"

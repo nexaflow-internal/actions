@@ -1,0 +1,117 @@
+name: melange-test
+description: Test one already-built melange package without rebuilding it
+
+inputs:
+  config:
+    description: Path to the melange package manifest
+    required: true
+  package:
+    description: Package name, used for workspace and source directories
+    required: true
+  arch:
+    description: Architecture to test for
+    required: false
+    default: x86_64
+  repository-path:
+    description: |
+      Root of the local apk repository to test against. Leave empty in
+      published mode, where base-repository and base-keyring are used.
+    required: false
+    default: ${{ github.workspace }}/../pkgs-local
+  public-key-path:
+    description: |
+      Public key for the local repository index. Defaults to the public key of
+      melange-build's default throwaway signing key. Leave empty in published
+      mode, where base-keyring is used.
+    required: false
+    default: ${{ runner.temp }}/keyring/ci.rsa.pub
+  base-repository:
+    description: Published repository appended to the test environment
+    required: false
+    default: ''
+  base-keyring:
+    description: Published keyring appended to the test environment
+    required: false
+    default: ''
+  extra-repository:
+    description: Optional extra repository appended to the test environment
+    required: false
+    default: ''
+  workspace-dir:
+    description: Root of the melange test workspaces
+    required: false
+    default: ${{ runner.temp }}/melange-ws
+  runner:
+    description: Melange runner
+    required: false
+    default: bubblewrap
+  pipeline-dir:
+    description: Directory with custom melange pipelines
+    required: false
+    default: ./pipelines
+  test-package-append:
+    description: Extra package installed into the test guest
+    required: false
+    default: mara-base
+  dry-run:
+    description: Print the fully expanded melange test command and exit without executing it
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup melange
+      uses: nexaflow-internal/actions/setup-melange@f3d391cde5cedca53128e2df2720008ae92dd828
+
+    - name: Setup bubblewrap
+      if: inputs.runner == 'bubblewrap'
+      uses: nexaflow-internal/actions/setup-bubblewrap@9b997927532d84a1c21ca32fcac23a5a6285693c
+
+    - name: Test package
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        PACKAGE: ${{ inputs.package }}
+        ARCH: ${{ inputs.arch }}
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+        PUBLIC_KEY_PATH: ${{ inputs.public-key-path }}
+        WORKSPACE_DIR: ${{ inputs.workspace-dir }}
+        RUNNER: ${{ inputs.runner }}
+        PIPELINE_DIR: ${{ inputs.pipeline-dir }}
+        TEST_PACKAGE_APPEND: ${{ inputs.test-package-append }}
+        BASE_REPOSITORY: ${{ inputs.base-repository }}
+        BASE_KEYRING: ${{ inputs.base-keyring }}
+        EXTRA_REPOSITORY: ${{ inputs.extra-repository }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        COMMAND_FILE: ${{ runner.temp }}/melange-test-command.txt
+      run: |
+        set -euo pipefail
+        args=(
+          "$CONFIG"
+          --runner "$RUNNER"
+          --arch "$ARCH"
+        )
+        # Local mode: repository + public key. Published mode leaves both empty.
+        if [ -n "$REPOSITORY_PATH" ]; then args+=(--repository-append "$REPOSITORY_PATH"); fi
+        if [ -n "$PUBLIC_KEY_PATH" ]; then args+=(--keyring-append "$PUBLIC_KEY_PATH"); fi
+        args+=(
+          --pipeline-dirs "$PIPELINE_DIR"
+          --test-package-append "$TEST_PACKAGE_APPEND"
+          --workspace-dir "$WORKSPACE_DIR/test-ws/$PACKAGE"
+          --source-dir "./$PACKAGE"
+        )
+        if [ -n "$BASE_KEYRING" ]; then args+=(--keyring-append "$BASE_KEYRING"); fi
+        if [ -n "$BASE_REPOSITORY" ]; then args+=(--repository-append "$BASE_REPOSITORY"); fi
+        if [ -n "$EXTRA_REPOSITORY" ]; then args+=(--repository-append "$EXTRA_REPOSITORY"); fi
+
+        cmd_parts=(melange test "${args[@]}")
+        printf -v cmd_line '%q ' "${cmd_parts[@]}"
+        cmd_line="${cmd_line% }"
+        echo "melange-test command: $cmd_line"
+        printf '%s\n' "$cmd_line" > "$COMMAND_FILE"
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "melange-test: dry-run, command printed but not executed"
+          exit 0
+        fi
+        melange test "${args[@]}"

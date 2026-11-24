@@ -19,6 +19,7 @@ on:
       - 'setup-bubblewrap/**'
       - 'apko-publish/**'
       - 'melange-build/**'
+      - 'melange-test/**'
       - 'melange-lint/**'
       - 'apk-upload-pool/**'
       - 'apk-publish-index/**'
@@ -27,6 +28,7 @@ on:
       - 'tests/fixtures/**'
       - 'tests/fixtures/apko/**'
       - 'tests/fixtures/snapshot/**'
+      - 'tests/fixtures/melange-test/**'
 
 permissions:
   contents: read
@@ -606,3 +608,79 @@ jobs:
           fi
           test -e "$RUNNER_TEMP/catalog-snapshot-dispatch-signal"
           echo "catalog-snapshot: dry-run assertions OK (layout, rclone sync, no S3 writes)"
+
+  melange-test:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: melange-test local mode (dry run)
+        id: melange-test-local
+        uses: ./melange-test
+        with:
+          config: tests/fixtures/hello-fixture.yaml
+          package: hello-fixture
+          repository-path: ${{ runner.temp }}/apk-repo
+          public-key-path: ${{ runner.temp }}/keyring/ci.rsa.pub
+          dry-run: 'true'
+
+      - name: capture local-mode command
+        shell: bash
+        run: cp "$RUNNER_TEMP/melange-test-command.txt" "$RUNNER_TEMP/melange-test-local-command.txt"
+
+      - name: verify local-mode dry-run command
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmdfile="$RUNNER_TEMP/melange-test-local-command.txt"
+          test -f "$cmdfile"
+          cmd="$(cat "$cmdfile")"
+          echo "$cmd"
+          printf '%s\n' "$cmd" | grep -F -- 'melange test'
+          printf '%s\n' "$cmd" | grep -F -- 'tests/fixtures/hello-fixture.yaml'
+          printf '%s\n' "$cmd" | grep -F -- '--runner bubblewrap'
+          printf '%s\n' "$cmd" | grep -F -- '--arch x86_64'
+          printf '%s\n' "$cmd" | grep -F -- "--repository-append $RUNNER_TEMP/apk-repo"
+          printf '%s\n' "$cmd" | grep -F -- "--keyring-append $RUNNER_TEMP/keyring/ci.rsa.pub"
+          printf '%s\n' "$cmd" | grep -F -- '--pipeline-dirs ./pipelines'
+          printf '%s\n' "$cmd" | grep -F -- '--test-package-append mara-base'
+          printf '%s\n' "$cmd" | grep -F -- "--workspace-dir $RUNNER_TEMP/melange-ws/test-ws/hello-fixture"
+          printf '%s\n' "$cmd" | grep -F -- '--source-dir ./hello-fixture'
+          ! printf '%s\n' "$cmd" | grep -F -- 'melange build'
+          echo "melange-test: local-mode dry-run assertions OK"
+
+      - name: melange-test published mode (dry run)
+        id: melange-test-published
+        uses: ./melange-test
+        with:
+          config: tests/fixtures/hello-fixture.yaml
+          package: hello-fixture
+          repository-path: ''
+          public-key-path: ''
+          base-repository: https://dl.nexaflow.by/main
+          base-keyring: https://dl.nexaflow.by/keyring/nexaflow.rsa.pub
+          dry-run: 'true'
+
+      - name: capture published-mode command
+        shell: bash
+        run: cp "$RUNNER_TEMP/melange-test-command.txt" "$RUNNER_TEMP/melange-test-published-command.txt"
+
+      - name: verify published-mode dry-run command
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmdfile="$RUNNER_TEMP/melange-test-published-command.txt"
+          test -f "$cmdfile"
+          cmd="$(cat "$cmdfile")"
+          echo "$cmd"
+          printf '%s\n' "$cmd" | grep -F -- 'melange test'
+          printf '%s\n' "$cmd" | grep -F -- '--repository-append https://dl.nexaflow.by/main'
+          printf '%s\n' "$cmd" | grep -F -- '--keyring-append https://dl.nexaflow.by/keyring/nexaflow.rsa.pub'
+          # Published mode must not depend on a local signing key or local repo.
+          ! printf '%s\n' "$cmd" | grep -F -- 'ci.rsa.pub'
+          ! printf '%s\n' "$cmd" | grep -F -- '/apk-repo'
+          ! printf '%s\n' "$cmd" | grep -F -- 'melange build'
+          # The action itself never invokes a build step.
+          ! grep -Rni -- 'melange build' "$GITHUB_WORKSPACE/melange-test" "$GITHUB_WORKSPACE/tests/fixtures/melange-test"
+          echo "melange-test: published-mode dry-run assertions OK"

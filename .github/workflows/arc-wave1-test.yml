@@ -13,6 +13,7 @@ on:
       - 'setup-melange/**'
       - 'setup-apko/**'
       - 'setup-cosign/**'
+      - 'setup-crane/**'
       - 'setup-bubblewrap/**'
       - 'melange-build/**'
       - 'melange-lint/**'
@@ -349,3 +350,27 @@ jobs:
           echo "$out" | grep -qE 'GitVersion:[[:space:]]+v3\.'
           test "$SETUP_COSIGN_VERSION" = "3.1.4"
           echo "setup-cosign: version output matches cosign version ($SETUP_COSIGN_VERSION)"
+
+  setup-crane:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-crane
+        id: setup-crane
+        uses: ./setup-crane
+
+      - name: verify setup-crane
+        shell: bash
+        env:
+          SETUP_CRANE_VERSION: ${{ steps.setup-crane.outputs.version }}
+        run: |
+          set -euo pipefail
+          command -v crane
+          out="$(crane version)"
+          test -n "$out"
+          echo "$out"
+          test "$out" = "$SETUP_CRANE_VERSION"
+          test "$SETUP_CRANE_VERSION" = "0.22.1"
+          echo "setup-crane: version output matches crane version ($SETUP_CRANE_VERSION)"

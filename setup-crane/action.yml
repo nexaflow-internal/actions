@@ -1,0 +1,49 @@
+name: setup-crane
+description: Install google/go-containerregistry crane into the runner temp directory and add it to PATH
+
+inputs:
+  version:
+    description: crane version to install (without the leading v)
+    required: false
+    default: 0.22.1
+  checksum:
+    description: |
+      SHA-256 checksum of go-containerregistry_Linux_x86_64.tar.gz for the given version.
+      When overriding version, callers must pass the matching checksum.
+    required: false
+    default: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+
+outputs:
+  version:
+    description: Installed crane version (without the leading v)
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure wget
+      shell: bash
+      run: |
+        command -v wget || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends wget; }
+        mkdir -p "$RUNNER_TEMP/bin"
+
+    - name: Download and verify crane
+      uses: nexaflow-internal/actions/wgetsum@v0
+      with:
+        url: https://github.com/google/go-containerregistry/releases/download/v${{ inputs.version }}/go-containerregistry_Linux_x86_64.tar.gz
+        checksum: ${{ inputs.checksum }}
+        output: ${{ runner.temp }}/crane.tar.gz
+        wget-flags: "-c --tries=3 --timeout=30"
+
+    - name: Install crane
+      shell: bash
+      run: |
+        set -euo pipefail
+        tar xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP/bin" crane
+        chmod +x "$RUNNER_TEMP/bin/crane"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+    - name: Expose crane version output
+      id: version
+      shell: bash
+      run: echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"

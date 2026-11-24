@@ -1,0 +1,22 @@
+# Fixture for the melange-build build-only test: the package builds cleanly,
+# but its test block deliberately fails. The old action (with its Test package
+# step) goes red; build-only melange-build must stay green without testing.
+package:
+  name: hello-failtest
+  version: "1.0.0"
+  epoch: 0
+  description: "ARC build-only test fixture with a deliberately failing test"
+  copyright:
+    - license: Apache-2.0
+environment:
+  contents:
+    packages:
+      - busybox
+pipeline:
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/usr/share/hello-failtest
+      printf 'hello\n' > "${{targets.destdir}}"/usr/share/hello-failtest/hello
+test:
+  pipeline:
+    - runs: |
+        exit 1

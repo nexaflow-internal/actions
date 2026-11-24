@@ -29,6 +29,7 @@ on:
       - 'tests/fixtures/apko/**'
       - 'tests/fixtures/snapshot/**'
       - 'tests/fixtures/melange-test/**'
+      - 'tests/fixtures/no-test/**'
 
 permissions:
   contents: read
@@ -684,3 +685,55 @@ jobs:
           # The action itself never invokes a build step.
           ! grep -Rni -- 'melange build' "$GITHUB_WORKSPACE/melange-test" "$GITHUB_WORKSPACE/tests/fixtures/melange-test"
           echo "melange-test: published-mode dry-run assertions OK"
+
+  melange-build-v6:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: stage apko.yaml fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ./hello-failtest
+          cp tests/fixtures/no-test/apko.yaml ./hello-failtest/apko.yaml
+          test -f ./hello-failtest/apko.yaml
+
+      - name: melange-build build-only
+        id: build-only
+        uses: ./melange-build
+        with:
+          config: tests/fixtures/no-test/hello-failtest.yaml
+          package: hello-failtest
+          repository-path: ${{ runner.temp }}/apk-repo-v6
+          extra-repository: ''
+          env-files: ''
+          base-repository: https://dl.nexaflow.by/main
+          base-keyring: https://dl.nexaflow.by/keyring/nexaflow.rsa.pub
+
+      - name: verify build-only artifacts and outputs
+        shell: bash
+        env:
+          REPOSITORY_PATH: ${{ steps.build-only.outputs.repository-path }}
+          ARCH: ${{ steps.build-only.outputs.arch }}
+          APK_COUNT: ${{ steps.build-only.outputs.apk-count }}
+          PUBLIC_KEY_PATH: ${{ steps.build-only.outputs.public-key-path }}
+        run: |
+          set -euo pipefail
+          repo="$REPOSITORY_PATH/$ARCH"
+          test -d "$repo"
+          test -f "$repo/hello-failtest-1.0.0-r0.apk"
+          test -f "$repo/APKINDEX.tar.gz"
+          test "$ARCH" = "x86_64"
+          test "$APK_COUNT" = "1"
+          test -n "$REPOSITORY_PATH"
+          test -n "$PUBLIC_KEY_PATH"
+          # The build-only action definition must contain no test invocation.
+          # The fixture's test block fails, so a green job also proves none ran.
+          # Needles are assembled at runtime to keep this script's echo clean.
+          needled_test="$(printf 'melange\040test')"
+          needled_step="$(printf 'Test\040package')"
+          ! grep -Rni -- "$needled_test" "$GITHUB_WORKSPACE/melange-build"
+          ! grep -Rni -- "$needled_step" "$GITHUB_WORKSPACE/melange-build"
+          echo "melange-build-v6: artifact, output and no-test assertions OK"

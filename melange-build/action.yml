@@ -1,5 +1,5 @@
 name: melange-build
-description: Build, index and test one melange package (replaces make ci/build)
+description: Build and index one melange package without running tests
 
 inputs:
   config:
@@ -85,6 +85,20 @@ inputs:
     required: false
     default: ''
 
+outputs:
+  repository-path:
+    description: Root of the local apk repository produced by the build
+    value: ${{ steps.prepare-dirs.outputs.repository-path }}
+  arch:
+    description: Architecture the package was built and indexed for
+    value: ${{ steps.prepare-dirs.outputs.arch }}
+  apk-count:
+    description: Number of apks built and indexed
+    value: ${{ steps.index-packages.outputs.apk-count }}
+  public-key-path:
+    description: Public key that verifies the signed repository index
+    value: ${{ steps.prepare-key.outputs.public-key-path }}
+
 runs:
   using: composite
   steps:
@@ -95,6 +109,7 @@ runs:
       uses: nexaflow-internal/actions/setup-bubblewrap@v2
 
     - name: Prepare signing key
+      id: prepare-key
       shell: bash
       env:
         SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
@@ -111,8 +126,10 @@ runs:
           [ -f "$SIGNING_KEY_PATH.pub" ] || { echo "public key not found: $SIGNING_KEY_PATH.pub" >&2; exit 1; }
         fi
         [ -f "$SIGNING_KEY_PATH" ] && [ -f "$SIGNING_KEY_PATH.pub" ]
+        echo "public-key-path=$SIGNING_KEY_PATH.pub" >> "$GITHUB_OUTPUT"
 
     - name: Prepare build directories
+      id: prepare-dirs
       shell: bash
       env:
         ARCH: ${{ inputs.arch }}
@@ -137,6 +154,8 @@ runs:
         echo "melange-build: SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH_VALUE"
         echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
         echo "MELANGE_TMPDIR=$MELANGE_TMPDIR" >> "$GITHUB_ENV"
+        echo "repository-path=$REPOSITORY_PATH" >> "$GITHUB_OUTPUT"
+        echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
 
     - name: Build package
       shell: bash
@@ -194,6 +213,7 @@ runs:
         melange build "${args[@]}"
 
     - name: Index built packages
+      id: index-packages
       shell: bash
       env:
         ARCH: ${{ inputs.arch }}
@@ -211,6 +231,7 @@ runs:
         apks=("$repo"/*.apk)
         shopt -u nullglob
         [ "${#apks[@]}" -gt 0 ] || { echo "no apks built in $repo" >&2; exit 1; }
+        echo "apk-count=${#apks[@]}" >> "$GITHUB_OUTPUT"
         melange index --signing-key "$SIGNING_KEY_PATH" -o "$repo/APKINDEX.tar.gz" "${apks[@]}"
 
     - name: Stage local packages for apko.yaml
@@ -238,41 +259,6 @@ runs:
         mkdir -p "$stage"
         cp "${apks[@]}" "$stage/"
         melange index --signing-key "$SIGNING_KEY_PATH" -o "$stage/APKINDEX.tar.gz" "$stage"/*.apk >/dev/null
-
-    - name: Test package
-      shell: bash
-      env:
-        CONFIG: ${{ inputs.config }}
-        PACKAGE: ${{ inputs.package }}
-        ARCH: ${{ inputs.arch }}
-        REPOSITORY_PATH: ${{ inputs.repository-path }}
-        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
-        WORKSPACE_DIR: ${{ inputs.workspace-dir }}
-        RUNNER: ${{ inputs.runner }}
-        PIPELINE_DIR: ${{ inputs.pipeline-dir }}
-        TEST_PACKAGE_APPEND: ${{ inputs.test-package-append }}
-        BASE_REPOSITORY: ${{ inputs.base-repository }}
-        BASE_KEYRING: ${{ inputs.base-keyring }}
-        EXTRA_REPOSITORY: ${{ inputs.extra-repository }}
-        TMPDIR: ${{ runner.temp }}/melange-tmp
-        MELANGE_TMPDIR: ${{ runner.temp }}/melange-tmp
-      run: |
-        set -euo pipefail
-        args=(
-          "$CONFIG"
-          --runner "$RUNNER"
-          --arch "$ARCH"
-          --repository-append "$REPOSITORY_PATH"
-          --keyring-append "$SIGNING_KEY_PATH.pub"
-          --pipeline-dirs "$PIPELINE_DIR"
-          --test-package-append "$TEST_PACKAGE_APPEND"
-          --workspace-dir "$WORKSPACE_DIR/test-ws/$PACKAGE"
-          --source-dir "./$PACKAGE"
-        )
-        if [ -n "$BASE_KEYRING" ]; then args+=(--keyring-append "$BASE_KEYRING"); fi
-        if [ -n "$BASE_REPOSITORY" ]; then args+=(--repository-append "$BASE_REPOSITORY"); fi
-        if [ -n "$EXTRA_REPOSITORY" ]; then args+=(--repository-append "$EXTRA_REPOSITORY"); fi
-        melange test "${args[@]}"
 
     - name: Restore ownership and remove throwaway key
       if: always()

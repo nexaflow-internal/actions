@@ -1,0 +1,138 @@
+name: apko-publish
+description: Build and publish an apko image directly to an OCI registry (replaces docker load/tag/push)
+
+inputs:
+  config:
+    description: Path to the apko YAML configuration
+    required: true
+  image-ref:
+    description: Fully qualified target image reference (registry/repository:tag)
+    required: true
+  arch:
+    description: Architecture passed to apko publish
+    required: false
+    default: x86_64
+  sbom-path:
+    description: Directory where apko writes the SPDX SBOMs
+    required: false
+    default: out
+  apk-repo-base-url:
+    description: Base URL of the apk repository (APK_REPO_BASE_URL repo variable)
+    required: true
+  dry-run:
+    description: Print the exact command and set deterministic outputs without pushing
+    required: false
+    default: 'false'
+  registry-user:
+    description: Registry user (secret input); falls back to the REGISTRY_USER env
+    required: false
+    default: ''
+  registry-password:
+    description: Registry password (secret input); falls back to the REGISTRY_PASSWORD env
+    required: false
+    default: ''
+
+outputs:
+  digest:
+    description: Published image digest (sha256:...)
+    value: ${{ steps.publish.outputs.digest }}
+  image-ref:
+    description: Target image reference passed to apko
+    value: ${{ steps.publish.outputs.image-ref }}
+  sbom-path:
+    description: Directory containing the generated SPDX SBOMs
+    value: ${{ steps.publish.outputs.sbom-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup apko
+      uses: ./setup-apko
+
+    - name: Publish image
+      id: publish
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        ARCH: ${{ inputs.arch }}
+        SBOM_PATH: ${{ inputs.sbom-path }}
+        REPO_BASE: ${{ inputs.apk-repo-base-url }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        INPUT_REGISTRY_USER: ${{ inputs.registry-user }}
+        INPUT_REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+      run: |
+        set -euo pipefail
+
+        [ -n "$CONFIG" ] || { echo "apko-publish: config is required" >&2; exit 2; }
+        [ -f "$CONFIG" ] || { echo "apko-publish: config not found: $CONFIG" >&2; exit 1; }
+        [ -n "$IMAGE_REF" ] || { echo "apko-publish: image-ref is required" >&2; exit 2; }
+        [ -n "$ARCH" ] || { echo "apko-publish: arch is required" >&2; exit 2; }
+        [ -n "$SBOM_PATH" ] || { echo "apko-publish: sbom-path is required" >&2; exit 2; }
+        base="${REPO_BASE%/}"
+        [ -n "$base" ] || { echo "apko-publish: apk-repo-base-url is required" >&2; exit 2; }
+
+        flags=(
+          --arch "$ARCH"
+          --repository-append "$base/main"
+          --repository-append "$base/bootstrap/stage3"
+          --keyring-append "$base/keyring/nexaflow.rsa.pub"
+          --sbom-path "$SBOM_PATH"
+        )
+
+        # Print the fully expanded command. The same text is written to the
+        # runner temp dir so a test step can assert the exact wiring.
+        cmd="apko publish --arch $ARCH --repository-append $base/main --repository-append $base/bootstrap/stage3 --keyring-append $base/keyring/nexaflow.rsa.pub --sbom-path $SBOM_PATH $CONFIG $IMAGE_REF"
+        echo "$cmd"
+        printf '%s\n' "$cmd" > "${RUNNER_TEMP:-/tmp}/apko-publish-command.txt"
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "apko-publish: dry run — no credentials, no push, no SBOM check"
+          echo "digest=sha256:0000000000000000000000000000000000000000000000000000000000000000" >> "$GITHUB_OUTPUT"
+          echo "image-ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          echo "sbom-path=$SBOM_PATH" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # apko 1.4.17 authenticates through the Docker keychain. Materialize
+        # the credentials as a temporary keychain config (the --password-stdin
+        # equivalent that does not need docker on ARC); never echo them.
+        user="${INPUT_REGISTRY_USER:-${REGISTRY_USER:-}}"
+        password="${INPUT_REGISTRY_PASSWORD:-${REGISTRY_PASSWORD:-}}"
+        [ -n "$user" ] || { echo "apko-publish: registry credentials required (registry-user input or REGISTRY_USER env)" >&2; exit 1; }
+        [ -n "$password" ] || { echo "apko-publish: registry credentials required (registry-password input or REGISTRY_PASSWORD env)" >&2; exit 1; }
+        registry_host="${IMAGE_REF%%/*}"
+        [ -n "$registry_host" ] || { echo "apko-publish: cannot determine registry host from $IMAGE_REF" >&2; exit 2; }
+
+        cred_dir="$(mktemp -d)"
+        out_file="$(mktemp)"
+        trap 'rm -rf "$cred_dir"; rm -f "$out_file"' EXIT
+        auth="$(printf '%s:%s' "$user" "$password" | base64 | tr -d '\n')"
+        printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$registry_host" "$auth" > "$cred_dir/config.json"
+        chmod 600 "$cred_dir/config.json"
+        export DOCKER_CONFIG="$cred_dir"
+
+        # apko moves SBOM files into this directory; it does not create it.
+        mkdir -p "$SBOM_PATH"
+
+        echo "apko-publish: publishing $IMAGE_REF"
+        set +e
+        apko publish "${flags[@]}" "$CONFIG" "$IMAGE_REF" 2>&1 | tee "$out_file"
+        rc=${PIPESTATUS[0]}
+        set -e
+        [ "$rc" -eq 0 ] || { echo "apko-publish: apko publish failed (rc=$rc)" >&2; exit "$rc"; }
+
+        shopt -s nullglob
+        sboms=("$SBOM_PATH"/*.spdx.json)
+        shopt -u nullglob
+        [ "${#sboms[@]}" -gt 0 ] || { echo "apko-publish: no SBOM found in $SBOM_PATH after publish" >&2; exit 1; }
+
+        digest_ref="$(grep -Eo '[^[:space:]]+@sha256:[0-9a-f]{64}' "$out_file" | tail -1 || true)"
+        [ -n "$digest_ref" ] || { echo "apko-publish: could not parse digest from apko output" >&2; exit 1; }
+        digest="${digest_ref##*@}"
+        [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "apko-publish: malformed digest: $digest" >&2; exit 1; }
+
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        echo "image-ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+        echo "sbom-path=$SBOM_PATH" >> "$GITHUB_OUTPUT"
+        echo "apko-publish: published $digest (SBOM: ${sboms[0]})"

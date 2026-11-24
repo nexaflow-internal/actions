@@ -15,12 +15,14 @@ on:
       - 'setup-cosign/**'
       - 'setup-crane/**'
       - 'setup-bubblewrap/**'
+      - 'apko-publish/**'
       - 'melange-build/**'
       - 'melange-lint/**'
       - 'apk-upload-pool/**'
       - 'apk-publish-index/**'
       - 'apk-reconcile/**'
       - 'tests/fixtures/**'
+      - 'tests/fixtures/apko/**'
 
 permissions:
   contents: read
@@ -374,3 +376,43 @@ jobs:
           test "$out" = "$SETUP_CRANE_VERSION"
           test "$SETUP_CRANE_VERSION" = "0.22.1"
           echo "setup-crane: version output matches crane version ($SETUP_CRANE_VERSION)"
+
+  apko-publish:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: apko-publish dry run
+        id: apko-publish
+        uses: ./apko-publish
+        with:
+          config: tests/fixtures/apko/hello.yaml
+          image-ref: registry.invalid/nexaflow/hello:ci-test
+          arch: x86_64
+          sbom-path: out
+          apk-repo-base-url: https://dl.nexaflow.by
+          dry-run: 'true'
+
+      - name: verify dry-run command and outputs
+        shell: bash
+        env:
+          DRY_DIGEST: ${{ steps.apko-publish.outputs.digest }}
+          DRY_IMAGE_REF: ${{ steps.apko-publish.outputs.image-ref }}
+          DRY_SBOM_PATH: ${{ steps.apko-publish.outputs.sbom-path }}
+        run: |
+          set -euo pipefail
+          cmdfile="$RUNNER_TEMP/apko-publish-command.txt"
+          test -f "$cmdfile"
+          cmd="$(cat "$cmdfile")"
+          echo "$cmd"
+          printf '%s\n' "$cmd" | grep -F -- '--arch x86_64'
+          printf '%s\n' "$cmd" | grep -F -- '--repository-append https://dl.nexaflow.by/main'
+          printf '%s\n' "$cmd" | grep -F -- '--repository-append https://dl.nexaflow.by/bootstrap/stage3'
+          printf '%s\n' "$cmd" | grep -F -- '--keyring-append https://dl.nexaflow.by/keyring/nexaflow.rsa.pub'
+          printf '%s\n' "$cmd" | grep -F -- '--sbom-path out'
+          printf '%s\n' "$cmd" | grep -F -- 'registry.invalid/nexaflow/hello:ci-test'
+          test "$DRY_DIGEST" = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          test "$DRY_IMAGE_REF" = "registry.invalid/nexaflow/hello:ci-test"
+          test "$DRY_SBOM_PATH" = "out"
+          echo "apko-publish: dry-run assertions OK"

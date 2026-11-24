@@ -1,0 +1,12 @@
+# Minimal apko recipe used by the apko-publish dry-run test.
+# Repositories are injected by apko-publish via --repository-append.
+contents:
+  repositories: []
+  packages:
+    - busybox
+
+entrypoint:
+  command: /bin/sh
+
+archs:
+  - x86_64

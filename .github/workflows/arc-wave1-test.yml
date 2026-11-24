@@ -12,6 +12,7 @@ on:
       - 'setup-rclone/**'
       - 'setup-melange/**'
       - 'setup-apko/**'
+      - 'setup-cosign/**'
       - 'setup-bubblewrap/**'
       - 'melange-build/**'
       - 'melange-lint/**'
@@ -324,3 +325,27 @@ jobs:
           echo "$out" | grep -q "GitVersion:.*v${SETUP_APKO_VERSION}"
           test "$SETUP_APKO_VERSION" = "1.4.17"
           echo "setup-apko: version output matches apko version"
+
+  setup-cosign:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-cosign
+        id: setup-cosign
+        uses: ./setup-cosign
+
+      - name: verify setup-cosign
+        shell: bash
+        env:
+          SETUP_COSIGN_VERSION: ${{ steps.setup-cosign.outputs.version }}
+        run: |
+          set -euo pipefail
+          command -v cosign
+          out="$(cosign version)"
+          test -n "$out"
+          echo "$out"
+          echo "$out" | grep -qE 'GitVersion:[[:space:]]+v3\.'
+          test "$SETUP_COSIGN_VERSION" = "3.1.4"
+          echo "setup-cosign: version output matches cosign version ($SETUP_COSIGN_VERSION)"

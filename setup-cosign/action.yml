@@ -1,0 +1,48 @@
+name: setup-cosign
+description: Install sigstore/cosign into the runner temp directory and add it to PATH
+
+inputs:
+  version:
+    description: cosign version to install (without the leading v)
+    required: false
+    default: 3.1.4
+  checksum:
+    description: |
+      SHA-256 checksum of cosign-linux-amd64 for the given version.
+      When overriding version, callers must pass the matching checksum.
+    required: false
+    default: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+
+outputs:
+  version:
+    description: Installed cosign version (without the leading v)
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure wget
+      shell: bash
+      run: |
+        command -v wget || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends wget; }
+        mkdir -p "$RUNNER_TEMP/bin"
+
+    - name: Download and verify cosign
+      uses: nexaflow-internal/actions/wgetsum@v0
+      with:
+        url: https://github.com/sigstore/cosign/releases/download/v${{ inputs.version }}/cosign-linux-amd64
+        checksum: ${{ inputs.checksum }}
+        output: ${{ runner.temp }}/bin/cosign
+        wget-flags: "-c --tries=3 --timeout=30"
+
+    - name: Install cosign
+      shell: bash
+      run: |
+        set -euo pipefail
+        chmod +x "$RUNNER_TEMP/bin/cosign"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+    - name: Expose cosign version output
+      id: version
+      shell: bash
+      run: echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"

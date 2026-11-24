@@ -15,6 +15,7 @@ on:
       - 'setup-cosign/**'
       - 'cosign-attest/**'
       - 'setup-crane/**'
+      - 'registry-self-test/**'
       - 'setup-bubblewrap/**'
       - 'apko-publish/**'
       - 'melange-build/**'
@@ -475,3 +476,36 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/cosign-attest-keys/cosign.key" \
                 "$RUNNER_TEMP/cosign-attest-keys/cosign.pub"
+
+  registry-self-test:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: registry-self-test dry run
+        id: registry-self-test
+        uses: ./registry-self-test
+        with:
+          image-ref: registry.invalid/nexaflow/hello:ci-test
+          dry-run: 'true'
+
+      - name: verify dry-run command and no docker invocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The action prints the exact command to the log and records it here
+          # so it can be asserted without contacting the registry.
+          cmdfile="$RUNNER_TEMP/registry-self-test-command.txt"
+          test -f "$cmdfile"
+          cmd="$(cat "$cmdfile")"
+          echo "$cmd"
+          test "$cmd" = "crane manifest registry.invalid/nexaflow/hello:ci-test"
+          printf '%s\n' "$cmd" | grep -F -- 'crane manifest registry.invalid/nexaflow/hello:ci-test'
+          # No Docker CLI invocation in the planned command...
+          ! printf '%s\n' "$cmd" | grep -F -- 'docker'
+          # ...and none anywhere in the action definition either.
+          ! grep -Rni 'docker' "$GITHUB_WORKSPACE/registry-self-test"
+          # Dry-run exits before any registry contact (no execution marker).
+          test ! -e "$RUNNER_TEMP/registry-self-test-executed"
+          echo "registry-self-test: dry-run assertions OK (no docker, no registry contact)"

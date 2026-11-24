@@ -1,0 +1,64 @@
+name: registry-self-test
+description: Verify a published image manifest is retrievable from its registry using crane
+
+inputs:
+  image-ref:
+    description: Fully qualified image reference (tag or digest) to verify
+    required: true
+  registry-user:
+    description: Registry user (secret input); falls back to the REGISTRY_USER env
+    required: false
+    default: ''
+  registry-password:
+    description: Registry password (secret input); falls back to the REGISTRY_PASSWORD env
+    required: false
+    default: ''
+  dry-run:
+    description: Print the exact crane command without contacting the registry
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup crane
+      # Pin by full SHA: a relative ./setup-crane resolves against the caller's
+      # workspace and breaks when this action is used from containers; @v5 does
+      # not exist yet.
+      uses: nexaflow-internal/actions/setup-crane@cc911d37f5047a20e0ef3cd4e61d116758fa4f24
+
+    - name: Verify image manifest
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        INPUT_REGISTRY_USER: ${{ inputs.registry-user }}
+        INPUT_REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+      run: |
+        set -euo pipefail
+        [ -n "$IMAGE_REF" ] || { echo "registry-self-test: image-ref is required" >&2; exit 2; }
+
+        # Single source of truth for the plan: echoed to the log and recorded
+        # under runner temp so the caller's verification step can assert it.
+        cmd="crane manifest $IMAGE_REF"
+        echo "$cmd"
+        printf '%s\n' "$cmd" > "$RUNNER_TEMP/registry-self-test-command.txt"
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "registry-self-test: dry-run; no registry contact"
+          exit 0
+        fi
+
+        user="${INPUT_REGISTRY_USER:-${REGISTRY_USER:-}}"
+        password="${INPUT_REGISTRY_PASSWORD:-${REGISTRY_PASSWORD:-}}"
+        if [ -n "$user" ] || [ -n "$password" ]; then
+          [ -n "$user" ] && [ -n "$password" ] || { echo "registry-self-test: registry-user and registry-password must both be supplied" >&2; exit 2; }
+          registry_host="${IMAGE_REF%%/*}"
+          [ -n "$registry_host" ] || { echo "registry-self-test: cannot determine registry host from $IMAGE_REF" >&2; exit 2; }
+          # Password goes over stdin, never on the command line or in the log.
+          printf '%s' "$password" | crane auth login "$registry_host" --username "$user" --password-stdin >/dev/null
+        fi
+
+        echo executed > "$RUNNER_TEMP/registry-self-test-executed"
+        crane manifest "$IMAGE_REF" >/dev/null
+        echo "registry-self-test: manifest for $IMAGE_REF retrieved OK"

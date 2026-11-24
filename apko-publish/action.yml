@@ -47,7 +47,9 @@ runs:
   using: composite
   steps:
     - name: Setup apko
-      uses: ./setup-apko
+      # Pin by full SHA: a relative ./setup-apko would resolve against the
+      # consumer's workspace and break when this action is used from containers.
+      uses: nexaflow-internal/actions/setup-apko@99a76869a02be90e3745f97f1b1fce5e44916214
 
     - name: Publish image
       id: publish

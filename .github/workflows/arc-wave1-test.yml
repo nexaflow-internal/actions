@@ -13,6 +13,7 @@ on:
       - 'setup-melange/**'
       - 'setup-apko/**'
       - 'setup-cosign/**'
+      - 'cosign-attest/**'
       - 'setup-crane/**'
       - 'setup-bubblewrap/**'
       - 'apko-publish/**'
@@ -416,3 +417,61 @@ jobs:
           test "$DRY_IMAGE_REF" = "registry.invalid/nexaflow/hello:ci-test"
           test "$DRY_SBOM_PATH" = "out"
           echo "apko-publish: dry-run assertions OK"
+
+  cosign-attest:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: prepare throwaway cosign keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cosign-attest-keys"
+          printf 'throwaway-private-key\n' > "$RUNNER_TEMP/cosign-attest-keys/cosign.key"
+          printf 'throwaway-public-key\n' > "$RUNNER_TEMP/cosign-attest-keys/cosign.pub"
+          test -s "$RUNNER_TEMP/cosign-attest-keys/cosign.key"
+          test -s "$RUNNER_TEMP/cosign-attest-keys/cosign.pub"
+
+      - name: cosign-attest dry run
+        id: cosign-attest
+        uses: ./cosign-attest
+        with:
+          image-ref: registry.invalid/nexaflow/hello:ci-test
+          signing-key: ${{ runner.temp }}/cosign-attest-keys/cosign.key
+          verify-key: ${{ runner.temp }}/cosign-attest-keys/cosign.pub
+          sbom-path: out/sbom-x86_64.spdx.json
+          password: throwaway-password
+          dry-run: 'true'
+
+      - name: verify dry-run commands and no network writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The action prints the exact commands to the log and records them
+          # here so they can be asserted without contacting the registry.
+          cmdfile="$RUNNER_TEMP/cosign-attest-commands.txt"
+          test -f "$cmdfile"
+          cmd="$(cat "$cmdfile")"
+          echo "$cmd"
+          printf '%s\n' "$cmd" | grep -F -- 'cosign sign'
+          printf '%s\n' "$cmd" | grep -F -- 'cosign attest'
+          printf '%s\n' "$cmd" | grep -F -- '--type https://spdx.dev/Document'
+          printf '%s\n' "$cmd" | grep -F -- 'cosign verify'
+          printf '%s\n' "$cmd" | grep -F -- 'cosign verify-attestation'
+          printf '%s\n' "$cmd" | grep -F -- 'registry.invalid/nexaflow/hello:ci-test'
+          printf '%s\n' "$cmd" | grep -F -- 'out/sbom-x86_64.spdx.json'
+          # Never the bare `spdx` shorthand.
+          ! printf '%s\n' "$cmd" | grep -F -- '--type spdx'
+          # No command was executed: the unresolvable registry.invalid ref and
+          # the staged execution marker prove no sign/attest/verify ran.
+          test ! -e "$RUNNER_TEMP/cosign-attest-executed"
+          echo "cosign-attest: dry-run assertions OK (no network writes)"
+
+      - name: remove throwaway cosign keys
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/cosign-attest-keys/cosign.key" \
+                "$RUNNER_TEMP/cosign-attest-keys/cosign.pub"

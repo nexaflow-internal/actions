@@ -1,0 +1,96 @@
+name: cosign-attest
+description: Sign an image, attest its SPDX SBOM with cosign, then verify both
+
+inputs:
+  image-ref:
+    description: Fully qualified image reference (tag or digest) to sign and attest
+    required: true
+  signing-key:
+    description: Path to the cosign private key used for signing
+    required: true
+  verify-key:
+    description: Path to the cosign public key used for verification
+    required: true
+  sbom-path:
+    description: Path to the SPDX SBOM document to attest
+    required: false
+    default: out/sbom-x86_64.spdx.json
+  password:
+    description: Password for the encrypted private key (pass from secrets; not needed for dry-run)
+    required: false
+    default: ''
+  dry-run:
+    description: Print the exact commands without executing them or writing to the registry
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: setup-cosign
+      uses: nexaflow-internal/actions/setup-cosign@c740df1173159d8feaec1112889031f9abdf8ef6
+
+    - name: Stage cosign keys in runner temp
+      shell: bash
+      env:
+        SIGNING_KEY: ${{ inputs.signing-key }}
+        VERIFY_KEY: ${{ inputs.verify-key }}
+      run: |
+        set -euo pipefail
+        keydir="$RUNNER_TEMP/cosign-attest"
+        mkdir -p "$keydir"
+        cp "$SIGNING_KEY" "$keydir/cosign.key"
+        cp "$VERIFY_KEY" "$keydir/cosign.pub"
+        test -s "$keydir/cosign.key"
+        test -s "$keydir/cosign.pub"
+
+    - name: Sign, attest and verify
+      shell: bash
+      env:
+        COSIGN_PASSWORD: ${{ inputs.password }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        SBOM_PATH: ${{ inputs.sbom-path }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+        keydir="$RUNNER_TEMP/cosign-attest"
+        key="$keydir/cosign.key"
+        pub="$keydir/cosign.pub"
+        predicate_type="https://spdx.dev/Document"
+
+        # Single source of truth for the plan: printed to the log and recorded
+        # for assertion by the caller's verification step.
+        sign_cmd="cosign sign --key $key $IMAGE_REF"
+        attest_cmd="cosign attest --key $key --type $predicate_type --predicate $SBOM_PATH $IMAGE_REF"
+        verify_cmd="cosign verify --key $pub $IMAGE_REF"
+        verify_att_cmd="cosign verify-attestation --key $pub --type $predicate_type $IMAGE_REF"
+
+        cmds_file="$RUNNER_TEMP/cosign-attest-commands.txt"
+        {
+          printf '%s\n' "$sign_cmd"
+          printf '%s\n' "$attest_cmd"
+          printf '%s\n' "$verify_cmd"
+          printf '%s\n' "$verify_att_cmd"
+        } > "$cmds_file"
+
+        echo "cosign-attest: planned commands:"
+        cat "$cmds_file"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "cosign-attest: dry-run; no commands executed, no registry writes"
+          exit 0
+        fi
+
+        # Fail-fast sequence: any failure aborts before the next command.
+        echo executed > "$RUNNER_TEMP/cosign-attest-executed"
+        cosign sign --key "$key" "$IMAGE_REF"
+        cosign attest --key "$key" --type "$predicate_type" --predicate "$SBOM_PATH" "$IMAGE_REF"
+        cosign verify --key "$pub" "$IMAGE_REF"
+        cosign verify-attestation --key "$pub" --type "$predicate_type" "$IMAGE_REF"
+
+    - name: Remove staged private key
+      if: always()
+      shell: bash
+      run: |
+        rm -f "$RUNNER_TEMP/cosign-attest/cosign.key" \
+              "$RUNNER_TEMP/cosign-attest/cosign.pub"

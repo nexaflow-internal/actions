@@ -1,0 +1,49 @@
+name: setup-apko
+description: Install chainguard-dev/apko into the runner temp directory and add it to PATH
+
+inputs:
+  version:
+    description: apko version to install (without the leading v)
+    required: false
+    default: 1.4.17
+  checksum:
+    description: |
+      SHA-256 checksum of apko_<version>_linux_amd64.tar.gz.
+      When overriding version, callers must pass the matching checksum.
+    required: false
+    default: cb5f43875c93664297d4d0196081c7149c46315d7ea6eb6acb5b1ebb0511d1cc
+
+outputs:
+  version:
+    description: Installed apko version (without the leading v)
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure wget
+      shell: bash
+      run: |
+        command -v wget || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends wget; }
+
+    - name: Download and verify apko
+      uses: nexaflow-internal/actions/wgetsum@v0
+      with:
+        url: https://github.com/chainguard-dev/apko/releases/download/v${{ inputs.version }}/apko_${{ inputs.version }}_linux_amd64.tar.gz
+        checksum: ${{ inputs.checksum }}
+        output: ${{ runner.temp }}/apko.tar.gz
+        wget-flags: "-c --tries=3 --timeout=30"
+
+    - name: Install apko
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/bin"
+        tar xzf "$RUNNER_TEMP/apko.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/bin"
+        chmod +x "$RUNNER_TEMP/bin/apko"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+    - name: Expose apko version output
+      id: version
+      shell: bash
+      run: echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"

@@ -11,6 +11,7 @@ on:
       - 'setup-yam/**'
       - 'setup-rclone/**'
       - 'setup-melange/**'
+      - 'setup-apko/**'
       - 'setup-bubblewrap/**'
       - 'melange-build/**'
       - 'melange-lint/**'
@@ -299,3 +300,27 @@ jobs:
           test "$INDEX_ENTRIES" = 2
           test "$POOL_ORPHANS" = 1
           echo "apk-reconcile: dry-run A-D verification OK (no S3 env supplied)"
+
+  setup-apko:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-apko
+        id: setup-apko
+        uses: ./setup-apko
+
+      - name: verify setup-apko
+        shell: bash
+        env:
+          SETUP_APKO_VERSION: ${{ steps.setup-apko.outputs.version }}
+        run: |
+          set -euo pipefail
+          command -v apko
+          out="$(apko version)"
+          test -n "$out"
+          echo "$out"
+          echo "$out" | grep -q "GitVersion:.*v${SETUP_APKO_VERSION}"
+          test "$SETUP_APKO_VERSION" = "1.4.17"
+          echo "setup-apko: version output matches apko version"

@@ -1,0 +1,168 @@
+name: catalog-snapshot
+description: Stage the frozen catalog layout and sync it to the Garage snapshot prefix with rclone
+
+inputs:
+  bucket:
+    description: S3 bucket holding the snapshot prefix (S3_BUCKET contract)
+    required: false
+    default: ''
+  endpoint:
+    description: S3 endpoint (https://host or http://host:port); https:// is stripped for rclone
+    required: false
+    default: ''
+  access-key-id:
+    description: S3 access key id (secret input supplied by the caller)
+    required: false
+    default: ''
+  secret-access-key:
+    description: S3 secret access key (secret input supplied by the caller)
+    required: false
+    default: ''
+  region:
+    description: SigV4 region of the Garage S3 endpoint
+    required: false
+    default: garage
+  source-path:
+    description: Directory containing catalog.json, vex/ and images/
+    required: false
+    default: .
+  dry-run:
+    description: Stage and print the exact rclone sync command without contacting S3
+    required: false
+    default: 'false'
+
+outputs:
+  synced:
+    description: 'true only when the snapshot sync succeeded (or was simulated successfully in dry-run)'
+    value: ${{ steps.sync.outputs.synced }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup rclone
+      # Pin by full SHA: a relative ./setup-rclone would resolve against the
+      # caller's workspace (e.g. containers), not this action's repository.
+      uses: nexaflow-internal/actions/setup-rclone@890149fe5945449ac4b989852263040b28447e82
+
+    - name: Stage and sync snapshot
+      id: sync
+      shell: bash
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+        SECRET_ACCESS_KEY: ${{ inputs.secret-access-key }}
+        REGION: ${{ inputs.region }}
+        SOURCE_PATH: ${{ inputs.source-path }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        # Test hook, consulted only in dry-run: the ARC test sets
+        # CATALOG_SNAPSHOT_SIMULATE_FAILURE=true to exercise the fail path
+        # (synced=false) without a real S3 endpoint or credentials.
+      run: |
+        set -euo pipefail
+
+        [ -n "$SOURCE_PATH" ] || { echo "catalog-snapshot: source-path is required" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 2; }
+        [ -d "$SOURCE_PATH" ] || { echo "catalog-snapshot: source-path not found: $SOURCE_PATH" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 1; }
+        [ -f "$SOURCE_PATH/catalog.json" ] || { echo "catalog-snapshot: $SOURCE_PATH/catalog.json is missing" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 1; }
+        [ -d "$SOURCE_PATH/vex" ] || { echo "catalog-snapshot: $SOURCE_PATH/vex is missing" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 1; }
+
+        # A real push needs the full S3 env contract; dry-run does not.
+        if [ "$DRY_RUN" != "true" ]; then
+          for v in BUCKET ENDPOINT ACCESS_KEY_ID SECRET_ACCESS_KEY; do
+            val="${!v:-}"
+            [ -n "$val" ] || { echo "catalog-snapshot: $v is required (S3 endpoint/bucket/credentials)" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 2; }
+          done
+        fi
+
+        # Frozen layout (containers Makefile ci/snapshot-stage):
+        # catalog.json + vex/** + images/<n>/apko/*.yaml
+        # plus images/<n>/versions.yaml when that image declares one.
+        stage="$RUNNER_TEMP/snapshot"
+        rm -rf "$stage"
+        mkdir -p "$stage"
+        cp "$SOURCE_PATH/catalog.json" "$stage/catalog.json"
+        cp -R "$SOURCE_PATH/vex" "$stage/vex"
+
+        shopt -s nullglob
+        for d in "$SOURCE_PATH"/images/*/apko; do
+          [ -d "$d" ] || continue
+          n="$(basename "$(dirname "$d")")"
+          mkdir -p "$stage/images/$n/apko"
+          cp "$d"/*.yaml "$stage/images/$n/apko/"
+          if [ -f "$SOURCE_PATH/images/$n/versions.yaml" ]; then
+            cp "$SOURCE_PATH/images/$n/versions.yaml" "$stage/images/$n/versions.yaml"
+          fi
+        done
+        shopt -u nullglob
+
+        # Print and record the staged layout so the caller can assert it.
+        layout="$RUNNER_TEMP/catalog-snapshot-layout.txt"
+        ( cd "$stage" && find . -type f | sed -E 's|^\./||' | LC_ALL=C sort ) > "$layout"
+        cat "$layout"
+        grep -q '^catalog\.json$' "$layout" \
+          || { echo "catalog-snapshot: staging lost catalog.json" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 1; }
+        grep -q '^vex/' "$layout" \
+          || { echo "catalog-snapshot: staging lost vex/" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 1; }
+        grep -Eq '^images/[^/]+/apko/[^/]+\.yaml$' "$layout" \
+          || { echo "catalog-snapshot: staging lost images/*/apko/*.yaml" >&2; echo "synced=false" >> "$GITHUB_OUTPUT"; exit 1; }
+
+        # Endpoint normalization and remote mirror the Makefile S3 contract.
+        # https:// is stripped for rclone; http://host:port is left intact.
+        S3_HOST="$(printf '%s' "$ENDPOINT" | sed -E -e 's|^https://||' -e 's|/*$||')"
+        export RCLONE_CONFIG_NEXAFLOW_TYPE=s3
+        export RCLONE_CONFIG_NEXAFLOW_PROVIDER=Other
+        export RCLONE_CONFIG_NEXAFLOW_ENDPOINT="$S3_HOST"
+        export RCLONE_CONFIG_NEXAFLOW_REGION="${REGION:-garage}"
+        export RCLONE_CONFIG_NEXAFLOW_ACCESS_KEY_ID="${ACCESS_KEY_ID:-}"
+        export RCLONE_CONFIG_NEXAFLOW_SECRET_ACCESS_KEY="${SECRET_ACCESS_KEY:-}"
+        export RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE=true
+        export RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET=true
+        remote="nexaflow:$BUCKET/snapshot"
+
+        # Record only non-secret config values for assertions; never log keys.
+        envfile="$RUNNER_TEMP/catalog-snapshot-rclone-env.txt"
+        {
+          echo "RCLONE_CONFIG_NEXAFLOW_TYPE=$RCLONE_CONFIG_NEXAFLOW_TYPE"
+          echo "RCLONE_CONFIG_NEXAFLOW_PROVIDER=$RCLONE_CONFIG_NEXAFLOW_PROVIDER"
+          echo "RCLONE_CONFIG_NEXAFLOW_ENDPOINT=$RCLONE_CONFIG_NEXAFLOW_ENDPOINT"
+          echo "RCLONE_CONFIG_NEXAFLOW_REGION=$RCLONE_CONFIG_NEXAFLOW_REGION"
+          echo "RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE=$RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE"
+          echo "RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET=$RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET"
+        } > "$envfile"
+        cat "$envfile"
+
+        # Single source of truth for the plan: echoed to the log and recorded
+        # under runner temp for the caller's verification step.
+        rclone_cmd=(rclone sync)
+        if [ "$DRY_RUN" = "true" ]; then
+          rclone_cmd+=(--dry-run)
+        fi
+        rclone_cmd+=(--contimeout=10s --timeout=60s --retries 1 --low-level-retries 2)
+        rclone_cmd+=("$stage/" "$remote/")
+        cmd="$(printf '%s ' "${rclone_cmd[@]}")"
+        cmd="${cmd% }"
+        command_file="$RUNNER_TEMP/catalog-snapshot-command.txt"
+        printf '%s\n' "$cmd" > "$command_file"
+        echo "$cmd"
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "catalog-snapshot: dry run — no S3 writes"
+          if [ "${CATALOG_SNAPSHOT_SIMULATE_FAILURE:-}" = "true" ]; then
+            echo "catalog-snapshot: simulated sync failure (test hook)" >&2
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo synced=true >> "$GITHUB_OUTPUT"
+          echo synced > "$RUNNER_TEMP/catalog-snapshot-synced"
+          exit 0
+        fi
+
+        if "${rclone_cmd[@]}"; then
+          echo synced=true >> "$GITHUB_OUTPUT"
+          echo synced > "$RUNNER_TEMP/catalog-snapshot-synced"
+          echo "catalog-snapshot: snapshot synced to $remote/"
+        else
+          echo "catalog-snapshot: rclone sync failed; site dispatch must not fire" >&2
+          echo synced=false >> "$GITHUB_OUTPUT"
+          exit 1
+        fi

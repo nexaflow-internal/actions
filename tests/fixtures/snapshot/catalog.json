@@ -1,0 +1,18 @@
+{
+  "registry": "registry.nexaflow.by",
+  "namespace": "nexaflow",
+  "images": [
+    {
+      "name": "python",
+      "category": "Languages & Runtimes",
+      "summary": "Fixture entry for the catalog-snapshot dry run.",
+      "description": "Minimal catalog entry used only by the catalog-snapshot dry-run test in nexaflow-internal/actions."
+    },
+    {
+      "name": "jre",
+      "category": "Languages & Runtimes",
+      "summary": "Fixture entry with a versions.yaml sibling.",
+      "description": "Minimal versioned catalog entry used only by the catalog-snapshot dry-run test in nexaflow-internal/actions."
+    }
+  ]
+}

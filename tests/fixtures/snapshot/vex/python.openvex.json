@@ -1,0 +1,8 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/nexaflow-internal/actions/vex/python",
+  "author": "nexaflow-internal",
+  "timestamp": "2026-11-24T00:00:00Z",
+  "version": 1,
+  "statements": []
+}

@@ -1,0 +1,10 @@
+# versions.yaml is staged only for images that declare it.
+image: jre
+latest: "25"
+versions:
+  - line: 25
+    manifest: jre-25
+    enabled: true
+    upstream: "25.0.5"
+    tags:
+      - "25"

@@ -1,0 +1,11 @@
+# Minimal apko recipe: only the frozen snapshot layout is under test here.
+contents:
+  repositories: []
+  packages:
+    - busybox
+
+entrypoint:
+  command: /bin/sh
+
+archs:
+  - x86_64

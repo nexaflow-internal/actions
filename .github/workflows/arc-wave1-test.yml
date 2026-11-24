@@ -23,8 +23,10 @@ on:
       - 'apk-upload-pool/**'
       - 'apk-publish-index/**'
       - 'apk-reconcile/**'
+      - 'catalog-snapshot/**'
       - 'tests/fixtures/**'
       - 'tests/fixtures/apko/**'
+      - 'tests/fixtures/snapshot/**'
 
 permissions:
   contents: read
@@ -509,3 +511,92 @@ jobs:
           # Dry-run exits before any registry contact (no execution marker).
           test ! -e "$RUNNER_TEMP/registry-self-test-executed"
           echo "registry-self-test: dry-run assertions OK (no docker, no registry contact)"
+
+  catalog-snapshot:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: catalog-snapshot dry run (forced sync failure)
+        id: catalog-snapshot-fail
+        continue-on-error: true
+        uses: ./catalog-snapshot
+        with:
+          source-path: tests/fixtures/snapshot
+          bucket: ci-snapshot-bucket
+          endpoint: https://s3.invalid
+          access-key-id: ci-test-key
+          secret-access-key: ci-test-secret
+          dry-run: 'true'
+        env:
+          CATALOG_SNAPSHOT_SIMULATE_FAILURE: 'true'
+
+      - name: verify forced failure leaves synced=false and no dispatch signal
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.catalog-snapshot-fail.outcome }}" = "failure"
+          test "${{ steps.catalog-snapshot-fail.outputs.synced }}" = "false"
+          # publish.yml dispatches the site only when synced == true.
+          if [ "${{ steps.catalog-snapshot-fail.outputs.synced }}" = "true" ]; then
+            echo "catalog_updated" > "$RUNNER_TEMP/catalog-snapshot-dispatch-signal"
+          fi
+          test ! -e "$RUNNER_TEMP/catalog-snapshot-dispatch-signal"
+          test ! -e "$RUNNER_TEMP/catalog-snapshot-synced"
+          echo "catalog-snapshot: forced failure -> synced=false, no dispatch signal"
+
+      - name: catalog-snapshot dry run
+        id: catalog-snapshot
+        uses: ./catalog-snapshot
+        with:
+          source-path: tests/fixtures/snapshot
+          bucket: ci-snapshot-bucket
+          endpoint: https://s3.invalid
+          access-key-id: ci-test-key
+          secret-access-key: ci-test-secret
+          dry-run: 'true'
+
+      - name: verify staged layout, rclone command and synced=true
+        shell: bash
+        env:
+          SYNCED: ${{ steps.catalog-snapshot.outputs.synced }}
+        run: |
+          set -euo pipefail
+          test "$SYNCED" = "true"
+          layout="$RUNNER_TEMP/catalog-snapshot-layout.txt"
+          test -f "$layout"
+          cat "$layout"
+          grep -F -- 'catalog.json' "$layout"
+          grep -F -- 'vex/' "$layout"
+          grep -F -- 'images/python/apko/python.yaml' "$layout"
+          grep -F -- 'images/jre/apko/jre.yaml' "$layout"
+          grep -F -- 'images/jre/versions.yaml' "$layout"
+          # python has no versions.yaml — only images that declare it are staged
+          ! grep -F -- 'images/python/versions.yaml' "$layout"
+          cmdfile="$RUNNER_TEMP/catalog-snapshot-command.txt"
+          test -f "$cmdfile"
+          cmd="$(cat "$cmdfile")"
+          echo "$cmd"
+          printf '%s\n' "$cmd" | grep -F -- 'rclone sync'
+          printf '%s\n' "$cmd" | grep -F -- 'rclone sync --dry-run'
+          printf '%s\n' "$cmd" | grep -F -- 'nexaflow:ci-snapshot-bucket/snapshot/'
+          printf '%s\n' "$cmd" | grep -F -- '--contimeout=10s'
+          envfile="$RUNNER_TEMP/catalog-snapshot-rclone-env.txt"
+          test -f "$envfile"
+          cat "$envfile"
+          grep -F -- 'RCLONE_CONFIG_NEXAFLOW_TYPE=s3' "$envfile"
+          grep -F -- 'RCLONE_CONFIG_NEXAFLOW_PROVIDER=Other' "$envfile"
+          grep -F -- 'RCLONE_CONFIG_NEXAFLOW_ENDPOINT=s3.invalid' "$envfile"
+          grep -F -- 'RCLONE_CONFIG_NEXAFLOW_REGION=garage' "$envfile"
+          grep -F -- 'RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE=true' "$envfile"
+          grep -F -- 'RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET=true' "$envfile"
+          # No secret values and no site dispatch are part of the action.
+          ! grep -RniE 'curl|api\.github\.com|repository_dispatch' "$GITHUB_WORKSPACE/catalog-snapshot"
+          test -e "$RUNNER_TEMP/catalog-snapshot-synced"
+          # The downstream gate emits the dispatch signal only for synced=true.
+          if [ "$SYNCED" = "true" ]; then
+            echo "catalog_updated" > "$RUNNER_TEMP/catalog-snapshot-dispatch-signal"
+          fi
+          test -e "$RUNNER_TEMP/catalog-snapshot-dispatch-signal"
+          echo "catalog-snapshot: dry-run assertions OK (layout, rclone sync, no S3 writes)"

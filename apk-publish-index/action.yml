@@ -108,8 +108,13 @@ runs:
         else
           [ -n "${remote:-}" ] || { echo "apk-publish-index: no pool source — pass dry-run-pool-path or S3 env" >&2; exit 1; }
           echo "apk-publish-index: remote=$remote arch=$ARCH"
+          # Do not pipe rclone into grep -q under `set -o pipefail`: grep
+          # closes the pipe on the first match, rclone gets SIGPIPE (141),
+          # and the whole `||` branch fires even though the apk is published.
+          pool_listing=$("${RCLONE[@]}" lsf "$remote/" 2>/dev/null) \
+            || { echo "apk-publish-index: failed to list pool $remote/" >&2; exit 1; }
           for p in $PACKAGES; do
-            "${RCLONE[@]}" lsf "$remote/" | grep -q "^$p-.*\.apk$" \
+            grep -q "^$p-.*\.apk$" <<< "$pool_listing" \
               || { echo "apk-publish-index: no published apk for '$p' in $remote/" >&2; exit 1; }
           done
           "${RCLONE[@]}" copy "$remote/" "$tmp/pool/" --include "*.apk" >/dev/null

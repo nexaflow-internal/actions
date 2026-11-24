@@ -213,6 +213,12 @@ jobs:
           dry-run: 'true'
           repository-path: ${{ runner.temp }}/apk-repo
 
+      - name: apk-upload-pool missing-object regression
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq; }
+          bash tests/apk-upload-pool-missing-object.sh
+
   apk-publish-index:
     runs-on: nexaflow-default
     steps:

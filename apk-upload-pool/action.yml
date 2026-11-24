@@ -94,7 +94,12 @@ runs:
 
             local_size=$(wc -c < "$apk" | tr -d ' ')
             remote_object="$remote/$name"
-            remote_size=$("${RCLONE[@]}" size --json "$remote_object" 2>/dev/null | jq -r '.bytes // empty' 2>/dev/null) || remote_size=''
+            # rclone size --json on a missing S3 object succeeds with
+            # {"bytes":0,"count":0}. Treat that as "absent": only a nonzero
+            # count means the object really exists in the pool. Otherwise a
+            # brand-new apk is mistaken for an immutable zero-byte object.
+            remote_json=$("${RCLONE[@]}" size --json "$remote_object" 2>/dev/null) || remote_json=''
+            remote_size=$(printf '%s' "$remote_json" | jq -r 'select(.count > 0) | .bytes | tostring' 2>/dev/null) || remote_size=''
             if [ -n "$remote_size" ]; then
               if [ "$remote_size" = "$local_size" ]; then
                 echo "apk-upload-pool: $name already published, skip"

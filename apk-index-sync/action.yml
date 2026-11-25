@@ -218,6 +218,12 @@ runs:
             else
               echo "indexed-apk-count=${#apks[@]}" >> "$GITHUB_OUTPUT"
             fi
+            # No-drift means no publish. In dry-run, full mode suppresses the
+            # output file to signal no-op; delta mode still writes it so callers
+            # can inspect the merged index content.
+            if [ "$DRY_RUN" = "true" ] && [ "$MODE" = "delta" ] && [ -n "$DRY_RUN_OUTPUT" ]; then
+              cp "$tmp/APKINDEX.new" "$DRY_RUN_OUTPUT"
+            fi
             exit 0
           fi
         fi

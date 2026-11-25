@@ -261,15 +261,23 @@ jobs:
 
       - name: verify delta dry-run
         shell: bash
+        env:
+          DELTA_MERGED: ${{ steps.delta.outputs.delta-merged }}
         run: |
           set -euo pipefail
           index="$RUNNER_TEMP/APKINDEX.delta"
           tar xzf "$index" -O APKINDEX > "$RUNNER_TEMP/APKINDEX.delta.text"
           grep -q '^P:ca-certificates$' "$RUNNER_TEMP/APKINDEX.delta.text"
           grep -q '^P:ca-certificates-bundle$' "$RUNNER_TEMP/APKINDEX.delta.text"
+          # Stale entry from the served index survives a delta merge.
           grep -q '^P:fixture-removed$' "$RUNNER_TEMP/APKINDEX.delta.text"
+          # The pool apk absent from the served index is appended: N -> N+1.
+          grep -q '^P:fixture-added$' "$RUNNER_TEMP/APKINDEX.delta.text"
+          test "$(grep -c '^P:' "$RUNNER_TEMP/APKINDEX.delta.text")" = 4
           test "$(cat "$RUNNER_TEMP/delta-count")" = 1
-          echo "apk-index-sync: delta dry-run OK"
+          # Proves the non-empty delta branch (--files-from + --merge) ran.
+          test "$DELTA_MERGED" = "true"
+          echo "apk-index-sync: delta dry-run OK (3 served entries + 1 new = 4)"
 
       - name: remove throwaway signing key
         if: always()
@@ -313,7 +321,9 @@ jobs:
           tar xzf "$RUNNER_TEMP/APKINDEX.full" -O APKINDEX > "$RUNNER_TEMP/APKINDEX.full.text"
           grep -q '^P:ca-certificates$' "$RUNNER_TEMP/APKINDEX.full.text"
           grep -q '^P:ca-certificates-bundle$' "$RUNNER_TEMP/APKINDEX.full.text"
+          grep -q '^P:fixture-added$' "$RUNNER_TEMP/APKINDEX.full.text"
           ! grep -q '^P:fixture-removed$' "$RUNNER_TEMP/APKINDEX.full.text"
+          test "$(grep -c '^P:' "$RUNNER_TEMP/APKINDEX.full.text")" = 3
 
       - name: remove throwaway signing key
         if: always()
@@ -359,6 +369,7 @@ jobs:
           tar xzf "$RUNNER_TEMP/APKINDEX.noindex" -O APKINDEX > "$RUNNER_TEMP/APKINDEX.noindex.text"
           grep -q '^P:ca-certificates$' "$RUNNER_TEMP/APKINDEX.noindex.text"
           grep -q '^P:ca-certificates-bundle$' "$RUNNER_TEMP/APKINDEX.noindex.text"
+          grep -q '^P:fixture-added$' "$RUNNER_TEMP/APKINDEX.noindex.text"
 
       - name: remove throwaway signing key
         if: always()
@@ -454,6 +465,60 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/keyring/ci.rsa" "$RUNNER_TEMP/keyring/ci.rsa.pub"
 
+  apk-index-sync-key-rotation:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup melange
+        uses: nexaflow-internal/actions/setup-melange@v2
+
+      - name: serve an index signed with the old key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/keyring"
+          melange keygen "$RUNNER_TEMP/keyring/old.rsa"
+          melange keygen "$RUNNER_TEMP/keyring/new.rsa"
+          bash tests/fixtures/index/generate.sh \
+            "$RUNNER_TEMP/index-pool" "$RUNNER_TEMP/keyring/old.rsa"
+          melange index --signing-key "$RUNNER_TEMP/keyring/old.rsa" \
+            -o "$RUNNER_TEMP/index-pool/APKINDEX.tar.gz" \
+            "$RUNNER_TEMP/index-pool"/*.apk
+
+      - name: apk-index-sync after key rotation
+        id: rotated
+        uses: ./apk-index-sync
+        with:
+          mode: full
+          signing-key-path: ${{ runner.temp }}/keyring/new.rsa
+          base-url: https://dl.nexaflow.by
+          dry-run: 'true'
+          dry-run-pool-path: ${{ runner.temp }}/index-pool
+          dry-run-output: ${{ runner.temp }}/APKINDEX.rotated
+
+      - name: verify byte drift is detected despite identical APKINDEX text
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.rotated.outputs.skipped-publish }}" = "false"
+          test -f "$RUNNER_TEMP/APKINDEX.rotated"
+          tar xzf "$RUNNER_TEMP/index-pool/APKINDEX.tar.gz" -O APKINDEX \
+            > "$RUNNER_TEMP/rotated.old.text"
+          tar xzf "$RUNNER_TEMP/APKINDEX.rotated" -O APKINDEX \
+            > "$RUNNER_TEMP/rotated.new.text"
+          cmp -s "$RUNNER_TEMP/rotated.old.text" "$RUNNER_TEMP/rotated.new.text"
+          ! cmp -s "$RUNNER_TEMP/index-pool/APKINDEX.tar.gz" "$RUNNER_TEMP/APKINDEX.rotated"
+          echo "apk-index-sync: key rotation detected by full-tarball comparison"
+
+      - name: remove throwaway signing keys
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/keyring/old.rsa" "$RUNNER_TEMP/keyring/old.rsa.pub" \
+                "$RUNNER_TEMP/keyring/new.rsa" "$RUNNER_TEMP/keyring/new.rsa.pub"
+
   apk-index-sync-empty-delta:
     runs-on: nexaflow-default
     steps:
@@ -471,6 +536,9 @@ jobs:
           melange keygen "$RUNNER_TEMP/keyring/ci.rsa"
           bash tests/fixtures/index/generate-delta.sh \
             "$RUNNER_TEMP/index-pool" "$RUNNER_TEMP/keyring/ci.rsa"
+          # Restore an empty delta: with all pool apks already indexed, the
+          # action must still compare the full signed tarball byte-for-byte.
+          rm -f "$RUNNER_TEMP/index-pool/fixture-added-2.0-r0.apk"
 
       - name: apk-index-sync empty-delta
         id: sync

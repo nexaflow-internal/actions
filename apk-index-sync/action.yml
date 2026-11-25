@@ -38,8 +38,11 @@ outputs:
     description: Number of packages verified in delta mode
     value: ${{ steps.publish.outputs.indexed-apk-count }}
   skipped-publish:
-    description: true when the new index is identical to the served index
+    description: true when the new index is byte-identical to the served index
     value: ${{ steps.publish.outputs.skipped-publish }}
+  delta-merged:
+    description: true only when a non-empty delta was merged into the served index
+    value: ${{ steps.publish.outputs.delta-merged }}
 
 runs:
   using: composite
@@ -80,6 +83,12 @@ runs:
         tmp=$(mktemp -d || { echo "apk-index-sync: mktemp failed (TMPDIR=${TMPDIR:-unset} exists?)" >&2; exit 1; })
         trap 'rm -rf "$tmp"' EXIT
         mkdir -p "$tmp/pool"
+
+        # delta-merged proves that the non-empty delta branch (download via
+        # rclone copy --files-from + melange index --merge) was taken. The
+        # byte-comparison probe for an empty delta does not set it.
+        delta_merged=false
+        probe_only=false
 
         # The extra input is consulted only for a dry run; production always
         # reads the pool and the previous index through rclone.
@@ -141,19 +150,16 @@ runs:
             printf '%s\n' "${pool_apks[@]}" | sed 's#.*/##' | grep '\.apk$' | sort -u > "$tmp/pool.list" || true
             comm -23 "$tmp/pool.list" "$tmp/indexed.list" > "$tmp/delta.list"
             if [ ! -s "$tmp/delta.list" ] && [ "$has_old" = true ]; then
-              echo "apk-index-sync: no drift"
-              echo "skipped-publish=true" >> "$GITHUB_OUTPUT"
-              count=0
-              for p in $PACKAGES; do
-                count=$((count + 1))
-              done
-              echo "indexed-apk-count=$count" >> "$GITHUB_OUTPUT"
-              if [ "$DRY_RUN" = "true" ] && [ -n "$DRY_RUN_OUTPUT" ]; then
-                cp "$tmp/old.tar.gz" "$DRY_RUN_OUTPUT"
-              fi
-              exit 0
-            fi
-            if [ -s "$tmp/delta.list" ]; then
+              # An empty delta still has to be compared byte-for-byte: equal
+              # APKINDEX text can hide a changed signature (key rotation).
+              # Re-merging one already-indexed apk with the current key is an
+              # O(1) probe that produces a directly comparable tarball.
+              probe=$(head -n 1 "$tmp/pool.list" || true)
+              [ -n "$probe" ] || { echo "apk-index-sync: empty delta but pool has no apk for signature comparison" >&2; exit 1; }
+              cp "$pool_src/$probe" "$tmp/pool/"
+              probe_only=true
+              echo "apk-index-sync: empty delta — checking served index bytes with current signing key"
+            elif [ -s "$tmp/delta.list" ]; then
               while IFS= read -r apk; do
                 [ -n "$apk" ] || continue
                 cp "$pool_src/$apk" "$tmp/pool/"
@@ -193,19 +199,14 @@ runs:
             printf '%s\n' "$pool_listing" | grep '\.apk$' | sort -u > "$tmp/pool.list" || true
             comm -23 "$tmp/pool.list" "$tmp/indexed.list" > "$tmp/delta.list"
             if [ ! -s "$tmp/delta.list" ] && [ "$has_old" = true ]; then
-              echo "apk-index-sync: no drift"
-              echo "skipped-publish=true" >> "$GITHUB_OUTPUT"
-              count=0
-              for p in $PACKAGES; do
-                count=$((count + 1))
-              done
-              echo "indexed-apk-count=$count" >> "$GITHUB_OUTPUT"
-              if [ "$DRY_RUN" = "true" ] && [ -n "$DRY_RUN_OUTPUT" ]; then
-                cp "$tmp/old.tar.gz" "$DRY_RUN_OUTPUT"
-              fi
-              exit 0
-            fi
-            if [ -s "$tmp/delta.list" ]; then
+              # Same O(1) byte-comparison probe as the local dry-run path.
+              probe=$(head -n 1 "$tmp/pool.list" || true)
+              [ -n "$probe" ] || { echo "apk-index-sync: empty delta but pool has no apk for signature comparison" >&2; exit 1; }
+              "${RCLONE[@]}" copyto "$remote/$probe" "$tmp/pool/$probe" \
+                || { echo "apk-index-sync: failed to download probe apk '$probe'" >&2; exit 1; }
+              probe_only=true
+              echo "apk-index-sync: empty delta — checking served index bytes with current signing key"
+            elif [ -s "$tmp/delta.list" ]; then
               "${RCLONE[@]}" copy --files-from "$tmp/delta.list" "$remote/" "$tmp/pool/"
             fi
           else
@@ -220,7 +221,12 @@ runs:
 
         if [ "$MODE" = "delta" ]; then
           if [ "$has_old" = true ]; then
-            echo "apk-index-sync: merging delta into existing index"
+            if [ "$probe_only" = true ]; then
+              echo "apk-index-sync: empty delta — rebuilt index with current key for byte comparison"
+            else
+              echo "apk-index-sync: merging delta into existing index"
+              delta_merged=true
+            fi
             melange index --merge --source "$tmp/old.tar.gz" --arch "$ARCH" \
               --signing-key "$SIGNING_KEY_PATH" -o "$tmp/APKINDEX.new" "${apks[@]}"
           else
@@ -244,10 +250,13 @@ runs:
         fi
 
         if [ "$has_old" = true ]; then
-          tar xzf "$tmp/old.tar.gz" -O APKINDEX > "$tmp/APKINDEX.old.text"
-          if cmp -s "$tmp/APKINDEX.old.text" "$tmp/APKINDEX.text"; then
-            echo "apk-index-sync: no drift"
+          # Compare the whole signed tarball, not just the extracted APKINDEX:
+          # identical text with a different signature (e.g. after a key
+          # rotation) must still trigger a PUT.
+          if cmp -s "$tmp/old.tar.gz" "$tmp/APKINDEX.new"; then
+            echo "apk-index-sync: no drift (byte-identical index)"
             echo "skipped-publish=true" >> "$GITHUB_OUTPUT"
+            echo "delta-merged=$delta_merged" >> "$GITHUB_OUTPUT"
             if [ "$MODE" = "delta" ]; then
               count=0
               for p in $PACKAGES; do
@@ -265,9 +274,11 @@ runs:
             fi
             exit 0
           fi
+          echo "apk-index-sync: index bytes differ (content or signature changed)"
         fi
 
         echo "skipped-publish=false" >> "$GITHUB_OUTPUT"
+        echo "delta-merged=$delta_merged" >> "$GITHUB_OUTPUT"
         if [ "$MODE" = "delta" ]; then
           count=0
           for p in $PACKAGES; do

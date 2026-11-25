@@ -2,7 +2,9 @@
 # Build a tiny local stand-in for nexaflow:<bucket>/main/x86_64 used by the
 # apk-index-sync dry-run tests. Like generate.sh, but the served APKINDEX
 # contains an extra entry (fixture-removed) that no longer exists in the pool,
-# so delta/full mode behavior can be asserted.
+# and the pool contains an extra apk (fixture-added) absent from the served
+# index. The non-empty delta is therefore exactly fixture-added, while the
+# stale fixture-removed entry must survive a delta merge.
 #
 # usage: generate-delta.sh <pool-dir> <signing-key-path>
 set -euo pipefail
@@ -42,10 +44,13 @@ EOF
 make_apk ca-certificates ca-certificates 20261020-r3 "$pool/ca-certificates-20261020-r3.apk"
 make_apk ca-certificates-bundle ca-certificates 20261020-r3 "$pool/ca-certificates-bundle-20261020-r3.apk"
 make_apk fixture-removed fixture-removed 1.0-r0 "$pool/fixture-removed-1.0-r0.apk"
+make_apk fixture-added fixture-added 2.0-r0 "$pool/fixture-added-2.0-r0.apk"
 
-# A previously published index carrying all three apks. The delta/full tests
-# remove fixture-removed from the pool below so the old index has 3 entries
-# while the pool has 2.
+# A previously published index carrying the first three apks. The tests remove
+# fixture-removed from the pool below, leaving 3 pool apks (ca-certificates,
+# ca-certificates-bundle, fixture-added) and a 3-entry served index whose only
+# delta is fixture-added. A delta merge must yield 4 entries: the N served
+# entries plus the new one, with the stale entry still present.
 melange index --signing-key "$key" -o "$pool/APKINDEX.tar.gz" \
   "$pool/ca-certificates-20261020-r3.apk" \
   "$pool/ca-certificates-bundle-20261020-r3.apk" \

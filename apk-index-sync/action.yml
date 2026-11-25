@@ -125,19 +125,45 @@ runs:
               [ "${#matches[@]}" -gt 0 ] || { echo "apk-index-sync: no local apk for '$p' in $pool_src" >&2; exit 1; }
             done
           fi
-          shopt -s nullglob
-          pool_apks=("$pool_src"/*.apk)
-          shopt -u nullglob
-          if [ "$MODE" = "full" ]; then
-            cp "${pool_apks[@]}" "$tmp/pool/"
-          else
-            # Copy all pool apks locally; delta computation below selects what
-            # gets merged. This keeps the local dry-run path simple.
-            cp "${pool_apks[@]}" "$tmp/pool/"
-          fi
           if [ -f "$pool_src/APKINDEX.tar.gz" ]; then
             cp "$pool_src/APKINDEX.tar.gz" "$tmp/old.tar.gz"
             has_old=true
+          fi
+          if [ "$MODE" = "delta" ]; then
+            if [ "$has_old" = true ]; then
+              tar xzf "$tmp/old.tar.gz" -O APKINDEX | awk '/^P:/{p=substr($0,3)} /^V:/{v=substr($0,3)} /^$/{if(p!=""){print p"-"v".apk"; p=""; v=""}} END{if(p!="")print p"-"v".apk"}' | sort -u > "$tmp/indexed.list"
+            else
+              : > "$tmp/indexed.list"
+            fi
+            shopt -s nullglob
+            pool_apks=("$pool_src"/*.apk)
+            shopt -u nullglob
+            printf '%s\n' "${pool_apks[@]}" | sed 's#.*/##' | grep '\.apk$' | sort -u > "$tmp/pool.list" || true
+            comm -23 "$tmp/pool.list" "$tmp/indexed.list" > "$tmp/delta.list"
+            if [ ! -s "$tmp/delta.list" ] && [ "$has_old" = true ]; then
+              echo "apk-index-sync: no drift"
+              echo "skipped-publish=true" >> "$GITHUB_OUTPUT"
+              count=0
+              for p in $PACKAGES; do
+                count=$((count + 1))
+              done
+              echo "indexed-apk-count=$count" >> "$GITHUB_OUTPUT"
+              if [ "$DRY_RUN" = "true" ] && [ -n "$DRY_RUN_OUTPUT" ]; then
+                cp "$tmp/old.tar.gz" "$DRY_RUN_OUTPUT"
+              fi
+              exit 0
+            fi
+            if [ -s "$tmp/delta.list" ]; then
+              while IFS= read -r apk; do
+                [ -n "$apk" ] || continue
+                cp "$pool_src/$apk" "$tmp/pool/"
+              done < "$tmp/delta.list"
+            fi
+          else
+            shopt -s nullglob
+            pool_apks=("$pool_src"/*.apk)
+            shopt -u nullglob
+            cp "${pool_apks[@]}" "$tmp/pool/"
           fi
         else
           [ -n "${remote:-}" ] || { echo "apk-index-sync: no pool source — pass dry-run-pool-path or S3 env" >&2; exit 1; }
@@ -166,6 +192,19 @@ runs:
             fi
             printf '%s\n' "$pool_listing" | grep '\.apk$' | sort -u > "$tmp/pool.list" || true
             comm -23 "$tmp/pool.list" "$tmp/indexed.list" > "$tmp/delta.list"
+            if [ ! -s "$tmp/delta.list" ] && [ "$has_old" = true ]; then
+              echo "apk-index-sync: no drift"
+              echo "skipped-publish=true" >> "$GITHUB_OUTPUT"
+              count=0
+              for p in $PACKAGES; do
+                count=$((count + 1))
+              done
+              echo "indexed-apk-count=$count" >> "$GITHUB_OUTPUT"
+              if [ "$DRY_RUN" = "true" ] && [ -n "$DRY_RUN_OUTPUT" ]; then
+                cp "$tmp/old.tar.gz" "$DRY_RUN_OUTPUT"
+              fi
+              exit 0
+            fi
             if [ -s "$tmp/delta.list" ]; then
               "${RCLONE[@]}" copy --files-from "$tmp/delta.list" "$remote/" "$tmp/pool/"
             fi

@@ -454,6 +454,48 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/keyring/ci.rsa" "$RUNNER_TEMP/keyring/ci.rsa.pub"
 
+  apk-index-sync-empty-delta:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup melange
+        uses: nexaflow-internal/actions/setup-melange@v2
+
+      - name: prepare throwaway signing key and dry-run pool
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/keyring"
+          melange keygen "$RUNNER_TEMP/keyring/ci.rsa"
+          bash tests/fixtures/index/generate-delta.sh \
+            "$RUNNER_TEMP/index-pool" "$RUNNER_TEMP/keyring/ci.rsa"
+
+      - name: apk-index-sync empty-delta
+        id: sync
+        uses: ./apk-index-sync
+        with:
+          mode: delta
+          packages: ca-certificates
+          signing-key-path: ${{ runner.temp }}/keyring/ci.rsa
+          base-url: https://dl.nexaflow.by
+          dry-run: 'true'
+          dry-run-pool-path: ${{ runner.temp }}/index-pool
+
+      - name: verify empty-delta no-drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.sync.outputs.skipped-publish }}" = "true"
+          echo "apk-index-sync: empty-delta dry-run OK"
+
+      - name: remove throwaway signing key
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/keyring/ci.rsa" "$RUNNER_TEMP/keyring/ci.rsa.pub"
+
   apk-reconcile:
     runs-on: nexaflow-default
     steps:

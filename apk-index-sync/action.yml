@@ -1,0 +1,268 @@
+name: apk-index-sync
+description: Publish the apk pool into a signed APKINDEX (delta/full modes)
+
+inputs:
+  packages:
+    description: Space-separated package names; required in delta mode, optional in full mode
+    required: false
+    default: ''
+  arch:
+    description: Architecture subdirectory of the pool and index
+    required: false
+    default: x86_64
+  signing-key-path:
+    description: Path to the apk signing key
+    required: true
+  base-url:
+    description: Public repository base URL used by the self-test GET
+    required: true
+  mode:
+    description: Index mode, delta or full
+    required: false
+    default: delta
+  dry-run:
+    description: Build and verify the index locally without PUT or .prev rotation
+    required: false
+    default: 'false'
+  dry-run-pool-path:
+    description: Local pool directory read instead of rclone when dry-run is true
+    required: false
+    default: ''
+  dry-run-output:
+    description: When dry-run is true, copy the new index to this path
+    required: false
+    default: ''
+
+outputs:
+  indexed-apk-count:
+    description: Number of packages verified in delta mode
+    value: ${{ steps.publish.outputs.indexed-apk-count }}
+  skipped-publish:
+    description: true when the new index is identical to the served index
+    value: ${{ steps.publish.outputs.skipped-publish }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup melange
+      uses: nexaflow-internal/actions/setup-melange@v2
+
+    - name: Setup rclone
+      uses: nexaflow-internal/actions/setup-rclone@v1
+
+    - name: Publish index
+      id: publish
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        ARCH: ${{ inputs.arch }}
+        SIGNING_KEY_PATH: ${{ inputs.signing-key-path }}
+        BASE_URL: ${{ inputs.base-url }}
+        MODE: ${{ inputs.mode }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        DRY_RUN_POOL_PATH: ${{ inputs.dry-run-pool-path }}
+        DRY_RUN_OUTPUT: ${{ inputs.dry-run-output }}
+        # S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY and
+        # optional S3_REGION are supplied by the caller as job/step env.
+      run: |
+        set -euo pipefail
+
+        [ "$MODE" = "delta" ] || [ "$MODE" = "full" ] || { echo "apk-index-sync: mode must be delta or full, got '$MODE'" >&2; exit 2; }
+        if [ "$MODE" = "delta" ]; then
+          [ -n "$PACKAGES" ] || { echo "apk-index-sync: packages is required in delta mode" >&2; exit 2; }
+        fi
+        [ -n "$ARCH" ] || { echo "apk-index-sync: arch is required" >&2; exit 2; }
+        [ -n "$SIGNING_KEY_PATH" ] || { echo "apk-index-sync: signing-key-path is required" >&2; exit 2; }
+        [ -f "$SIGNING_KEY_PATH" ] || { echo "apk-index-sync: signing key not found: $SIGNING_KEY_PATH" >&2; exit 1; }
+        BASE_URL="${BASE_URL%/}"
+        [ -n "$BASE_URL" ] || { echo "apk-index-sync: base-url is required" >&2; exit 2; }
+
+        tmp=$(mktemp -d || { echo "apk-index-sync: mktemp failed (TMPDIR=${TMPDIR:-unset} exists?)" >&2; exit 1; })
+        trap 'rm -rf "$tmp"' EXIT
+        mkdir -p "$tmp/pool"
+
+        # The extra input is consulted only for a dry run; production always
+        # reads the pool and the previous index through rclone.
+        use_local=false
+        if [ "$DRY_RUN" = "true" ] && [ -n "$DRY_RUN_POOL_PATH" ]; then
+          use_local=true
+        fi
+
+        if [ "$DRY_RUN" != "true" ]; then
+          for v in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+            val="${!v:-}"
+            [ -n "$val" ] || { echo "apk-index-sync: $v is required (S3 env contract)" >&2; exit 1; }
+          done
+        fi
+
+        # Configure the rclone remote from the S3 env contract. In a dry run
+        # with a local pool this block is skipped entirely (no S3 access).
+        if [ -n "${S3_ENDPOINT:-}" ] && [ -n "${S3_BUCKET:-}" ]; then
+          S3_HOST=$(printf '%s' "$S3_ENDPOINT" | sed -E -e 's|^https://||' -e 's|/*$||')
+          S3_REGION="${S3_REGION:-garage}"
+          export RCLONE_CONFIG_NEXAFLOW_TYPE=s3
+          export RCLONE_CONFIG_NEXAFLOW_PROVIDER=Other
+          export RCLONE_CONFIG_NEXAFLOW_ENDPOINT="$S3_HOST"
+          export RCLONE_CONFIG_NEXAFLOW_REGION="$S3_REGION"
+          export RCLONE_CONFIG_NEXAFLOW_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-}"
+          export RCLONE_CONFIG_NEXAFLOW_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-}"
+          export RCLONE_CONFIG_NEXAFLOW_FORCE_PATH_STYLE=true
+          export RCLONE_CONFIG_NEXAFLOW_NO_CHECK_BUCKET=true
+          remote="nexaflow:$S3_BUCKET/main/$ARCH"
+          RCLONE=(rclone --contimeout=10s --timeout=60s)
+        fi
+
+        has_old=false
+        if [ "$use_local" = true ]; then
+          echo "apk-index-sync: dry run — reading pool from $DRY_RUN_POOL_PATH (no S3, no writes)"
+          pool_src="$DRY_RUN_POOL_PATH"
+          [ -d "$pool_src" ] || { echo "apk-index-sync: dry-run pool path not found: $pool_src" >&2; exit 1; }
+          if [ "$MODE" = "delta" ]; then
+            for p in $PACKAGES; do
+              shopt -s nullglob
+              matches=("$pool_src"/"$p"-*.apk)
+              shopt -u nullglob
+              [ "${#matches[@]}" -gt 0 ] || { echo "apk-index-sync: no local apk for '$p' in $pool_src" >&2; exit 1; }
+            done
+          fi
+          shopt -s nullglob
+          pool_apks=("$pool_src"/*.apk)
+          shopt -u nullglob
+          if [ "$MODE" = "full" ]; then
+            cp "${pool_apks[@]}" "$tmp/pool/"
+          else
+            # Copy all pool apks locally; delta computation below selects what
+            # gets merged. This keeps the local dry-run path simple.
+            cp "${pool_apks[@]}" "$tmp/pool/"
+          fi
+          if [ -f "$pool_src/APKINDEX.tar.gz" ]; then
+            cp "$pool_src/APKINDEX.tar.gz" "$tmp/old.tar.gz"
+            has_old=true
+          fi
+        else
+          [ -n "${remote:-}" ] || { echo "apk-index-sync: no pool source — pass dry-run-pool-path or S3 env" >&2; exit 1; }
+          echo "apk-index-sync: remote=$remote arch=$ARCH mode=$MODE"
+          # Do not pipe rclone into grep -q under `set -o pipefail`: grep
+          # closes the pipe on the first match, rclone gets SIGPIPE (141),
+          # and the whole `||` branch fires even though the apk is published.
+          pool_listing=$("${RCLONE[@]}" lsf "$remote/" 2>/dev/null) \
+            || { echo "apk-index-sync: failed to list pool $remote/" >&2; exit 1; }
+          if [ "$MODE" = "delta" ]; then
+            for p in $PACKAGES; do
+              grep -q "^$p-.*\.apk$" <<< "$pool_listing" \
+                || { echo "apk-index-sync: no published apk for '$p' in $remote/" >&2; exit 1; }
+            done
+          fi
+          if "${RCLONE[@]}" copyto "$remote/APKINDEX.tar.gz" "$tmp/old.tar.gz" 2>/dev/null; then
+            has_old=true
+          else
+            has_old=false
+          fi
+          if [ "$MODE" = "delta" ]; then
+            if [ "$has_old" = true ]; then
+              tar xzf "$tmp/old.tar.gz" -O APKINDEX | awk '/^P:/{p=substr($0,3)} /^V:/{v=substr($0,3)} /^$/{if(p!=""){print p"-"v".apk"; p=""; v=""}} END{if(p!="")print p"-"v".apk"}' | sort -u > "$tmp/indexed.list"
+            else
+              : > "$tmp/indexed.list"
+            fi
+            printf '%s\n' "$pool_listing" | grep '\.apk$' | sort -u > "$tmp/pool.list" || true
+            comm -23 "$tmp/pool.list" "$tmp/indexed.list" > "$tmp/delta.list"
+            if [ -s "$tmp/delta.list" ]; then
+              "${RCLONE[@]}" copy --files-from "$tmp/delta.list" "$remote/" "$tmp/pool/"
+            fi
+          else
+            "${RCLONE[@]}" copy "$remote/" "$tmp/pool/" --include "*.apk" >/dev/null
+          fi
+        fi
+
+        shopt -s nullglob
+        apks=("$tmp/pool"/*.apk)
+        shopt -u nullglob
+        [ "${#apks[@]}" -gt 0 ] || { echo "apk-index-sync: no apks in pool" >&2; exit 1; }
+
+        if [ "$MODE" = "delta" ]; then
+          if [ "$has_old" = true ]; then
+            echo "apk-index-sync: merging delta into existing index"
+            melange index --merge --source "$tmp/old.tar.gz" --arch "$ARCH" \
+              --signing-key "$SIGNING_KEY_PATH" -o "$tmp/APKINDEX.new" "${apks[@]}"
+          else
+            echo "apk-index-sync: no existing index — creating (first publish)"
+            melange index --arch "$ARCH" --signing-key "$SIGNING_KEY_PATH" \
+              -o "$tmp/APKINDEX.new" "${apks[@]}"
+          fi
+        else
+          echo "apk-index-sync: full index rebuild"
+          melange index --arch "$ARCH" --signing-key "$SIGNING_KEY_PATH" \
+            -o "$tmp/APKINDEX.new" "${apks[@]}"
+        fi
+
+        tar xzf "$tmp/APKINDEX.new" -O APKINDEX > "$tmp/APKINDEX.text"
+        if [ "$MODE" = "delta" ]; then
+          for p in $PACKAGES; do
+            grep -q "^P:$p\$" "$tmp/APKINDEX.text" \
+              || { echo "apk-index-sync: FAIL: new index lacks '$p' (pool/merge broken?)" >&2; exit 1; }
+          done
+          echo "apk-index-sync: new index contains all requested packages"
+        fi
+
+        if [ "$has_old" = true ]; then
+          tar xzf "$tmp/old.tar.gz" -O APKINDEX > "$tmp/APKINDEX.old.text"
+          if cmp -s "$tmp/APKINDEX.old.text" "$tmp/APKINDEX.text"; then
+            echo "apk-index-sync: no drift"
+            echo "skipped-publish=true" >> "$GITHUB_OUTPUT"
+            if [ "$MODE" = "delta" ]; then
+              count=0
+              for p in $PACKAGES; do
+                count=$((count + 1))
+              done
+              echo "indexed-apk-count=$count" >> "$GITHUB_OUTPUT"
+            else
+              echo "indexed-apk-count=${#apks[@]}" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+        fi
+
+        echo "skipped-publish=false" >> "$GITHUB_OUTPUT"
+        if [ "$MODE" = "delta" ]; then
+          count=0
+          for p in $PACKAGES; do
+            count=$((count + 1))
+          done
+          echo "indexed-apk-count=$count" >> "$GITHUB_OUTPUT"
+        else
+          echo "indexed-apk-count=${#apks[@]}" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ "$DRY_RUN" = "true" ]; then
+          if [ -n "$DRY_RUN_OUTPUT" ]; then
+            cp "$tmp/APKINDEX.new" "$DRY_RUN_OUTPUT"
+          fi
+          echo "apk-index-sync: dry run — no PUT, no .prev rotation, no self-test"
+          echo "apk-index-sync: dry-run index entries:"
+          grep '^P:' "$tmp/APKINDEX.text" || true
+          echo "apk-index-sync: OK (dry run)"
+          exit 0
+        fi
+
+        "${RCLONE[@]}" copyto "$remote/APKINDEX.tar.gz" "$remote/APKINDEX.tar.gz.prev" \
+          --header-upload "Cache-Control: no-store" 2>/dev/null \
+          || echo "apk-index-sync: nothing to rotate into .prev"
+        "${RCLONE[@]}" copyto "$tmp/APKINDEX.new" "$remote/APKINDEX.tar.gz" \
+          --header-upload "Cache-Control: no-cache"
+
+        n=0; ok=0
+        while [ "$n" -lt 12 ]; do
+          if curl -sfL --max-time 30 "$BASE_URL/main/$ARCH/APKINDEX.tar.gz" -o "$tmp/verify" \
+             && cmp -s "$tmp/verify" "$tmp/APKINDEX.new"; then
+            ok=1; break
+          fi
+          n=$((n+1))
+          echo "apk-index-sync: self-test retry $n/12 (edge revalidation lag)"
+          sleep 10
+        done
+        if [ "$ok" = 1 ]; then
+          echo "apk-index-sync: self-test OK"
+        else
+          echo "apk-index-sync: WARN: served index not yet byte-identical (edge lag observed >2min; PUT confirmed by origin; reconcile checks drift nightly; TODO: CF purge API once creds exist)" >&2
+        fi
+        echo "apk-index-sync: OK"

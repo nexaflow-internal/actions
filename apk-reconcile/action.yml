@@ -22,6 +22,10 @@ inputs:
     description: Local pool directory read instead of rclone when dry-run is true
     required: false
     default: ''
+  manifests-dir:
+    description: Directory of top-level package manifests to compare against the index (check E)
+    required: false
+    default: '.'
 
 outputs:
   index-entries:
@@ -30,10 +34,19 @@ outputs:
   pool-orphans:
     description: Number of pool objects absent from the index (report only)
     value: ${{ steps.reconcile.outputs.pool-orphans }}
+  manifest-gaps:
+    description: Number of publishable manifests whose version is absent from the index (check E)
+    value: ${{ steps.reconcile.outputs.manifest-gaps }}
+  manifest-gaps-list:
+    description: Space-separated name-version-epoch strings missing from the index
+    value: ${{ steps.reconcile.outputs.manifest-gaps-list }}
 
 runs:
   using: composite
   steps:
+    - name: Setup melange
+      uses: nexaflow-internal/actions/setup-melange@v2
+
     - name: Setup rclone
       uses: nexaflow-internal/actions/setup-rclone@v1
 
@@ -46,6 +59,7 @@ runs:
         EXPECTED_KEYRING_SHA256: ${{ inputs.expected-keyring-sha256 }}
         DRY_RUN: ${{ inputs.dry-run }}
         DRY_RUN_POOL_PATH: ${{ inputs.dry-run-pool-path }}
+        MANIFESTS_DIR: ${{ inputs.manifests-dir }}
         # S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY and
         # optional S3_REGION are supplied by the caller as job/step env.
       run: |
@@ -151,6 +165,37 @@ runs:
           echo "WARN[D]: EXPECTED_KEYRING_SHA256 not set, keyring check skipped" 1>&2
         fi
 
+        # make ci/reconcile: E — every publishable manifest in the checkout
+        # must have its exact name-version-epoch in the served index. This is
+        # the check that catches publishes silently cancelled while pending.
+        sed 's/\.apk$//' "$tmp/list" | sort -u > "$tmp/indexed.pairs"
+        gaps=0
+        gaps_list=''
+        if [ ! -d "$MANIFESTS_DIR" ]; then
+          echo "FAIL[E]: manifests dir not found: $MANIFESTS_DIR" >&2
+          rc=1
+        else
+          shopt -s nullglob
+          manifests=("$MANIFESTS_DIR"/*.yaml)
+          shopt -u nullglob
+          for manifest in "${manifests[@]}"; do
+            expected=$(melange query "$manifest" '{{ .Package.Name }}-{{ .Package.Version }}-r{{ .Package.Epoch }}' 2>/dev/null) \
+              || { echo "FAIL[E]: cannot query $manifest" >&2; rc=1; continue; }
+            [ -n "$expected" ] || { echo "FAIL[E]: empty package identity from $manifest" >&2; rc=1; continue; }
+            publish=$(melange query "$manifest" '{{index .Package.Annotations "publish"}}' 2>/dev/null || true)
+            if [ "$publish" = "false" ]; then
+              continue
+            fi
+            if grep -Fxq "$expected" "$tmp/indexed.pairs"; then
+              continue
+            fi
+            echo "FAIL[E]: manifest $expected is absent from the index" >&2
+            gaps=$((gaps + 1))
+            gaps_list="${gaps_list:+$gaps_list }$expected"
+          done
+        fi
+        [ "$gaps" -eq 0 ] || rc=1
+
         orphans=$(wc -l < "$tmp/orphans" | tr -d ' ')
         echo "apk-reconcile: $count index entries ($ARCH)"
         # Outputs let a caller assert the same numbers that go into the step
@@ -158,9 +203,12 @@ runs:
         if [ -n "${GITHUB_OUTPUT:-}" ]; then
           printf 'index-entries=%s\n' "$count" >> "$GITHUB_OUTPUT"
           printf 'pool-orphans=%s\n' "$orphans" >> "$GITHUB_OUTPUT"
+          printf 'manifest-gaps=%s\n' "$gaps" >> "$GITHUB_OUTPUT"
+          printf 'manifest-gaps-list=%s\n' "$gaps_list" >> "$GITHUB_OUTPUT"
         fi
         if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-          printf '### reconcile %s\n\n- index entries: %s\n- pool orphans (report): %s\n' \
-            "$ARCH" "$count" "$orphans" >> "$GITHUB_STEP_SUMMARY"
+          printf '### reconcile %s\n\n- index entries: %s\n- pool orphans (report): %s\n- manifest gaps (fail): %s\n' \
+            "$ARCH" "$count" "$orphans" "$gaps" >> "$GITHUB_STEP_SUMMARY"
+          [ -z "$gaps_list" ] || printf '\nMissing from index: %s\n' "$gaps_list" >> "$GITHUB_STEP_SUMMARY"
         fi
         exit "$rc"

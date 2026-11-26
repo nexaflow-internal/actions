@@ -1,0 +1,7 @@
+package:
+  name: fixture-missing
+  version: "9.9.0"
+  epoch: 0
+  description: fixture package in main but absent from the index
+  copyright:
+    - license: MIT

@@ -1,0 +1,7 @@
+package:
+  name: fixture-beta
+  version: "2.0.0"
+  epoch: 0
+  description: fixture beta present in the index
+  copyright:
+    - license: MIT

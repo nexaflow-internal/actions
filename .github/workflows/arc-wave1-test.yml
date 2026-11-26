@@ -602,19 +602,54 @@ jobs:
           expected-keyring-sha256: 07ebd09bdbb3b28435b3fba48d42c7527ea27023d2a7da1d9d66800fa5c7efd5
           dry-run: 'true'
           dry-run-pool-path: tests/fixtures/reconcile
+          manifests-dir: tests/fixtures/reconcile/manifests-ok
 
-      - name: verify A-D summary
+      - name: verify A-E summary
         shell: bash
         env:
           INDEX_ENTRIES: ${{ steps.reconcile.outputs.index-entries }}
           POOL_ORPHANS: ${{ steps.reconcile.outputs.pool-orphans }}
+          MANIFEST_GAPS: ${{ steps.reconcile.outputs.manifest-gaps }}
         run: |
           set -euo pipefail
           echo "index entries: $INDEX_ENTRIES"
           echo "pool orphans (report): $POOL_ORPHANS"
+          echo "manifest gaps: $MANIFEST_GAPS"
           test "$INDEX_ENTRIES" = 2
           test "$POOL_ORPHANS" = 1
-          echo "apk-reconcile: dry-run A-D verification OK (no S3 env supplied)"
+          test "$MANIFEST_GAPS" = 0
+          echo "apk-reconcile: dry-run A-E verification OK (no S3 env supplied)"
+
+  apk-reconcile-manifest-gap:
+    runs-on: nexaflow-default
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: apk-reconcile with a manifest absent from the index
+        id: gap
+        continue-on-error: true
+        uses: ./apk-reconcile
+        with:
+          base-url: https://dl.nexaflow.by
+          arch: x86_64
+          expected-keyring-sha256: 07ebd09bdbb3b28435b3fba48d42c7527ea27023d2a7da1d9d66800fa5c7efd5
+          dry-run: 'true'
+          dry-run-pool-path: tests/fixtures/reconcile
+          manifests-dir: tests/fixtures/reconcile/manifests-gap
+
+      - name: verify FAIL[E] is loud
+        shell: bash
+        env:
+          GAP_OUTCOME: ${{ steps.gap.outcome }}
+          MANIFEST_GAPS: ${{ steps.gap.outputs.manifest-gaps }}
+          MANIFEST_GAPS_LIST: ${{ steps.gap.outputs.manifest-gaps-list }}
+        run: |
+          set -euo pipefail
+          test "$GAP_OUTCOME" = failure
+          test "$MANIFEST_GAPS" = 1
+          echo "$MANIFEST_GAPS_LIST" | grep -q 'fixture-missing-9.9.0-r0'
+          echo "apk-reconcile: FAIL[E] verified for fixture-missing-9.9.0-r0"
 
   setup-apko:
     runs-on: nexaflow-default

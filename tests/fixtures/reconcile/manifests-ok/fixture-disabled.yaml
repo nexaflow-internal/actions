@@ -1,0 +1,9 @@
+package:
+  name: fixture-disabled
+  version: "9.9.9"
+  epoch: 0
+  description: harness package that must be skipped by check E
+  copyright:
+    - license: MIT
+  annotations:
+    publish: false
